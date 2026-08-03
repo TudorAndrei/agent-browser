@@ -633,6 +633,145 @@ async fn e2e_snapshot_and_click_ref() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_captures_replayable_flow() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir =
+        std::env::temp_dir().join(format!("agent-browser-e2e-codegen-{}", std::process::id()));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen");
+
+    let mut state = DaemonState::new();
+    let launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let start = execute_command(
+        &json!({ "id": "2", "action": "codegen_start", "title": "smoke" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&start);
+    let page = "data:text/html,<button id=go>Go</button><div id=success>Success</div>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": page }),
+            &mut state,
+        )
+        .await,
+    );
+    // Observation commands must not create their own Recorder steps.
+    assert_success(&execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "click", "selector": "#go" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "isvisible", "selector": "#success" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let output = socket_dir.join("flow.json");
+    let stop = execute_command(
+        &json!({ "id": "7", "action": "codegen_stop", "path": output, "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let steps = get_data(&stop)["flow"]["steps"]
+        .as_array()
+        .expect("Recorder steps should be an array");
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| step["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["setViewport", "navigate", "click", "waitForElement"]
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_attaches_navigation_to_its_last_step() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-navigation-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-navigation");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "navigation" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<a id=go href='about:blank%23done'>Go</a>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "click", "selector": "#go" }),
+            &mut state,
+        )
+        .await,
+    );
+    let stop = execute_command(
+        &json!({ "id": "5", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let last_step = get_data(&stop)["flow"]["steps"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(last_step["type"], "click");
+    assert_eq!(last_step["assertedEvents"][0]["type"], "navigation");
+    assert_eq!(last_step["assertedEvents"][0]["url"], "about:blank#done");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------

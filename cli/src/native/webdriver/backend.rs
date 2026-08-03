@@ -129,6 +129,9 @@ pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
     "network",
     "har_start",
     "har_stop",
+    "codegen_start",
+    "codegen_stop",
+    "codegen_status",
 ];
 
 #[cfg(test)]

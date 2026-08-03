@@ -148,6 +148,23 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+pub(crate) fn format_codegen_status_text(data: &serde_json::Value) -> Option<String> {
+    let active = data.get("active")?.as_bool()?;
+    let title = data
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("agent-browser flow");
+    let steps = data
+        .get("steps")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    Some(if active {
+        format!("Codegen active: {title}\nCaptured steps: {steps}")
+    } else {
+        "Codegen inactive".to_string()
+    })
+}
+
 fn confirmation_data(data: &serde_json::Value) -> Option<&serde_json::Value> {
     if data
         .get("confirmation_required")
@@ -457,6 +474,34 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
             return;
+        }
+        if action == Some("codegen_status") {
+            if let Some(output) = format_codegen_status_text(data) {
+                println!("{}", output);
+                return;
+            }
+        }
+        if action == Some("codegen_stop") && data.get("path").is_none() {
+            if let Some(output) = data.get("output").and_then(|value| value.as_str()) {
+                if let Some(warning) = data.get("warning").and_then(|value| value.as_str()) {
+                    eprintln!("{} {}", color::warning_indicator(), warning);
+                }
+                println!("{output}");
+                return;
+            }
+        }
+        if action == Some("codegen_stop") {
+            if let Some(path) = data.get("path").and_then(|value| value.as_str()) {
+                println!(
+                    "{} Codegen flow saved to {}",
+                    color::success_indicator(),
+                    path
+                );
+                if let Some(warning) = data.get("warning").and_then(|value| value.as_str()) {
+                    eprintln!("{} {}", color::warning_indicator(), warning);
+                }
+                return;
+            }
         }
         if action == Some("vitals") {
             println!("{}", format_vitals_text(data));
@@ -2698,6 +2743,28 @@ Examples:
 "##
         }
 
+        "codegen" => {
+            r##"
+agent-browser codegen - Generate reusable browser test flows
+
+Usage: agent-browser codegen start [--title <title>]
+       agent-browser codegen stop [path] [--format <json|playwright>]
+       agent-browser codegen status
+
+Capture successful agent-browser actions as Chrome DevTools Recorder JSON. Use
+--format playwright to emit an @playwright/test spec. Unlike `record`, which
+creates a video, codegen creates a replayable test artifact.
+
+Examples:
+  agent-browser codegen start --title "login flow"
+  agent-browser open https://example.com/login
+  agent-browser fill "#email" "a@example.com"
+  agent-browser click "#submit"
+  agent-browser codegen stop ./login.flow.json
+  agent-browser codegen stop ./login.spec.ts --format playwright
+"##
+        }
+
         // === Console/Errors ===
         "console" => {
             r##"
@@ -3575,6 +3642,7 @@ Debug:
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
+  codegen start [--title]    Capture actions as Recorder JSON or Playwright
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
@@ -3984,6 +4052,20 @@ mod tests {
         let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
 
         assert_eq!(rendered, "Streaming disabled");
+    }
+
+    #[test]
+    fn test_format_codegen_status_text() {
+        assert_eq!(
+            super::format_codegen_status_text(
+                &json!({ "active": true, "title": "checkout", "steps": 3 })
+            ),
+            Some("Codegen active: checkout\nCaptured steps: 3".to_string())
+        );
+        assert_eq!(
+            super::format_codegen_status_text(&json!({ "active": false })),
+            Some("Codegen inactive".to_string())
+        );
     }
 
     #[test]
