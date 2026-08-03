@@ -38,6 +38,7 @@ export const navigation: NavSection[] = [
       { name: "CDP Mode", href: "/cdp-mode" },
       { name: "Streaming", href: "/streaming" },
       { name: "Video Recording", href: "/recording" },
+      { name: "Codegen", href: "/codegen" },
       { name: "WebGPU", href: "/webgpu" },
       { name: "Debugging", href: "/debugging" },
       { name: "Profiler", href: "/profiler" },

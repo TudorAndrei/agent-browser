@@ -334,6 +334,19 @@ agent-browser record stop
 
 See [references/video-recording.md](references/video-recording.md) for codec options, GIF export, and more.
 
+### Generate a reusable test flow
+
+Use `codegen` to capture successful actions as Chrome DevTools Recorder JSON or a Playwright spec. It is separate from `record`, which saves a video.
+
+```bash
+agent-browser codegen start --title "checkout"
+agent-browser click @e3
+agent-browser codegen stop ./checkout.json
+agent-browser codegen stop ./checkout.spec.ts --format playwright
+```
+
+See [references/codegen.md](references/codegen.md). Recorded values, including passwords, are stored verbatim, and unfinished flows survive daemon restarts through owner-only temporary capture data.
+
 ### Iframes
 
 Iframes are auto-inlined in the snapshot — their refs work transparently:

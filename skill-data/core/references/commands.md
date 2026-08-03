@@ -120,6 +120,16 @@ agent-browser record stop                 # Stop and save video
 agent-browser record restart ./take2.webm # Stop current + start new
 ```
 
+## Codegen
+
+```bash
+agent-browser codegen start [--title <title>]
+agent-browser codegen stop [path] [--format json|playwright]
+agent-browser codegen status
+```
+
+Capture successful automation actions as a Chrome DevTools Recorder flow. `codegen stop` prints the flow when no path is supplied; `--format playwright` emits an `@playwright/test` spec. `codegen` is different from `record`, which writes a video. Typed values are retained verbatim, including credentials, so review artifacts before committing them. See [codegen.md](codegen.md).
+
 ## Wait
 
 ```bash

@@ -141,6 +141,8 @@ agent-browser connect <port>          # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
+agent-browser codegen start [--title <title>]  # Capture a reusable test flow
+agent-browser codegen stop [path] [--format json|playwright]
 agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
 agent-browser chat "<instruction>"    # AI chat: natural language browser control (single-shot)
@@ -161,6 +163,20 @@ agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
+
+### Generate a reusable test flow
+
+`codegen` records successful agent-browser actions as a Chrome DevTools Recorder JSON flow. Use `--format playwright` to emit an `@playwright/test` spec instead. This is distinct from `record`, which creates a video.
+
+```bash
+agent-browser codegen start --title "login flow"
+agent-browser open https://example.com/login
+agent-browser fill "#email" "a@example.com"
+agent-browser click "#submit"
+agent-browser codegen stop ./login.flow.json
+```
+
+Popup targets and iframe paths are retained in both Recorder JSON and Playwright output. Recorded values, including password values, are written verbatim. An in-progress flow survives a daemon restart through owner-only temporary capture data in the socket directory. Review generated files before committing them.
 
 ### Read Agent-Friendly Text
 
