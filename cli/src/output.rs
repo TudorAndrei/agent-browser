@@ -149,7 +149,20 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
 }
 
 pub(crate) fn format_codegen_status_text(data: &serde_json::Value) -> Option<String> {
-    let active = data.get("active")?.as_bool()?;
+    let state = data
+        .get("state")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| {
+            if data
+                .get("active")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                "active"
+            } else {
+                "inactive"
+            }
+        });
     let title = data
         .get("title")
         .and_then(|value| value.as_str())
@@ -158,10 +171,19 @@ pub(crate) fn format_codegen_status_text(data: &serde_json::Value) -> Option<Str
         .get("steps")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
-    Some(if active {
-        format!("Codegen active: {title}\nCaptured steps: {steps}")
-    } else {
-        "Codegen inactive".to_string()
+    let actions = data
+        .get("capturedActions")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let warnings = data
+        .get("warningCount")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    Some(match state {
+        "inactive" => "Codegen inactive".to_string(),
+        _ => format!(
+            "Codegen {state}: {title}\nCaptured actions: {actions}\nCaptured steps: {steps}\nWarnings: {warnings}"
+        ),
     })
 }
 
@@ -2750,6 +2772,7 @@ agent-browser codegen - Generate reusable browser test flows
 Usage: agent-browser codegen start [--title <title>]
        agent-browser codegen stop [path] [--format <json|playwright>]
        agent-browser codegen status
+       agent-browser codegen discard
 
 Capture successful agent-browser actions as Chrome DevTools Recorder JSON. Use
 --format playwright to emit an @playwright/test spec. Unlike `record`, which
@@ -2762,6 +2785,7 @@ Examples:
   agent-browser click "#submit"
   agent-browser codegen stop ./login.flow.json
   agent-browser codegen stop ./login.spec.ts --format playwright
+  agent-browser codegen discard
 "##
         }
 
@@ -4058,14 +4082,27 @@ mod tests {
     fn test_format_codegen_status_text() {
         assert_eq!(
             super::format_codegen_status_text(
-                &json!({ "active": true, "title": "checkout", "steps": 3 })
+                &json!({ "state": "active", "active": true, "title": "checkout", "capturedActions": 2, "steps": 3, "warningCount": 0 })
             ),
-            Some("Codegen active: checkout\nCaptured steps: 3".to_string())
+            Some(
+                "Codegen active: checkout\nCaptured actions: 2\nCaptured steps: 3\nWarnings: 0"
+                    .to_string()
+            )
         );
         assert_eq!(
             super::format_codegen_status_text(&json!({ "active": false })),
             Some("Codegen inactive".to_string())
         );
+        for state in ["restored", "degraded", "recovery-error", "cleanup-pending"] {
+            assert_eq!(
+                super::format_codegen_status_text(
+                    &json!({ "state": state, "title": "flow", "capturedActions": 1, "steps": 2, "warningCount": 3 })
+                ),
+                Some(format!(
+                    "Codegen {state}: flow\nCaptured actions: 1\nCaptured steps: 2\nWarnings: 3"
+                ))
+            );
+        }
     }
 
     #[test]

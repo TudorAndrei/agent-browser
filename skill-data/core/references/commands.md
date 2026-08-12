@@ -126,9 +126,10 @@ agent-browser record restart ./take2.webm # Stop current + start new
 agent-browser codegen start [--title <title>]
 agent-browser codegen stop [path] [--format json|playwright]
 agent-browser codegen status
+agent-browser codegen discard
 ```
 
-Capture successful automation actions as a Chrome DevTools Recorder flow. `codegen stop` prints the flow when no path is supplied; `--format playwright` emits an `@playwright/test` spec. `codegen` is different from `record`, which writes a video. Typed values are retained verbatim, including credentials, so review artifacts before committing them. See [codegen.md](codegen.md).
+Capture successful automation actions as a Chrome DevTools Recorder flow. `codegen stop` prints the flow when no path is supplied; `--format playwright` emits an `@playwright/test` spec. `codegen status` reports capture and recovery state. `codegen discard` removes an unfinished or damaged journal. `codegen` is different from `record`, which writes a video. Typed values are retained verbatim, including credentials, so review artifacts before committing them. See [codegen.md](codegen.md).
 
 ## Wait
 

@@ -143,6 +143,8 @@ agent-browser stream status           # Show runtime streaming state and bound p
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser codegen start [--title <title>]  # Capture a reusable test flow
 agent-browser codegen stop [path] [--format json|playwright]
+agent-browser codegen status           # Show capture or recovery state
+agent-browser codegen discard          # Remove an unfinished or damaged flow
 agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
 agent-browser chat "<instruction>"    # AI chat: natural language browser control (single-shot)
@@ -176,7 +178,7 @@ agent-browser click "#submit"
 agent-browser codegen stop ./login.flow.json
 ```
 
-Popup targets and iframe paths are retained in both Recorder JSON and Playwright output. Recorded values, including password values, are written verbatim. An in-progress flow survives a daemon restart through owner-only temporary capture data in the socket directory. Review generated files before committing them.
+Popup targets and iframe paths are retained in both Recorder JSON and Playwright output. Recorded values, including password values, are written verbatim. An in-progress flow survives a daemon restart through an owner-only append-only journal in the socket directory. Use `codegen status` to inspect a restored flow and `codegen discard` to remove an unfinished, damaged, or cleanup-pending flow. A successful stop removes the journal. Review generated files before committing them.
 
 ### Read Agent-Friendly Text
 

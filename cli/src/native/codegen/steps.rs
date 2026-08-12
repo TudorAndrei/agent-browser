@@ -1,11 +1,10 @@
 use super::probe::{self, Probe};
-use super::sidecar;
 use crate::native::cdp::client::CdpClient;
 use crate::native::element::{parse_ref, RefMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Target {
     pub selectors: Vec<Vec<String>>,
     pub role: Option<String>,
@@ -15,7 +14,7 @@ pub struct Target {
     pub input_type: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scope {
     pub target: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -31,7 +30,7 @@ impl Default for Scope {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClickKind {
     Click,
     Check,
@@ -39,7 +38,7 @@ pub enum ClickKind {
     Tap,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Step {
     SetViewport {
         width: i64,
@@ -429,12 +428,7 @@ pub fn record_action(
         );
         state.viewport_emitted = true;
     }
-    for step in steps {
-        state.steps.push(step.clone());
-        if let Some(path) = state.sidecar_path.as_ref() {
-            sidecar::append(path, &step)?;
-        }
-    }
+    state.capture_action(action, steps);
     Ok(())
 }
 
@@ -534,13 +528,13 @@ pub fn has_frame_scope(steps: &[Step]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::codegen::CodegenState;
+    use crate::native::codegen::{CodegenState, CodegenStatus};
 
     #[test]
     fn captures_core_steps_and_skips_observations() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = CodegenState::new();
-        state.active = true;
+        state.status = CodegenStatus::Active;
         state.sidecar_path = Some(dir.path().join("flow.jsonl"));
         std::fs::write(state.sidecar_path.as_ref().unwrap(), "").unwrap();
         let refs = RefMap::new();
@@ -604,7 +598,7 @@ mod tests {
     #[test]
     fn records_observed_visibility_and_dedupes_navigation() {
         let mut state = CodegenState::new();
-        state.active = true;
+        state.status = CodegenStatus::Active;
         let refs = RefMap::new();
         record_action(
             "navigate",
@@ -643,7 +637,7 @@ mod tests {
     #[test]
     fn observation_before_first_action_emits_no_viewport() {
         let mut state = CodegenState::new();
-        state.active = true;
+        state.status = CodegenStatus::Active;
         record_action(
             "snapshot",
             &json!({}),
@@ -661,7 +655,7 @@ mod tests {
     #[test]
     fn captures_supported_actions_and_selector_forms() {
         let mut state = CodegenState::new();
-        state.active = true;
+        state.status = CodegenStatus::Active;
         let mut refs = RefMap::new();
         refs.add_selector("e1".into(), "#usable".into(), "button", "", None);
         let scope = Scope::default();
@@ -798,7 +792,7 @@ mod tests {
     #[test]
     fn ignores_observations_without_a_recorder_mapping() {
         let mut state = CodegenState::new();
-        state.active = true;
+        state.status = CodegenStatus::Active;
         for action in [
             "snapshot",
             "screenshot",
@@ -886,7 +880,7 @@ mod tests {
     #[test]
     fn emits_the_implicit_viewport_once_for_many_actions() {
         let mut state = CodegenState::new();
-        state.active = true;
+        state.status = CodegenStatus::Active;
         for action in ["navigate", "click", "hover"] {
             let command = if action == "navigate" {
                 json!({ "url": "https://example.com" })

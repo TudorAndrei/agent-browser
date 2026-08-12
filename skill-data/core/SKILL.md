@@ -345,7 +345,7 @@ agent-browser codegen stop ./checkout.json
 agent-browser codegen stop ./checkout.spec.ts --format playwright
 ```
 
-See [references/codegen.md](references/codegen.md). Recorded values, including passwords, are stored verbatim, and unfinished flows survive daemon restarts through owner-only temporary capture data.
+Use `agent-browser codegen status` to inspect a restored flow and `agent-browser codegen discard` to remove an unfinished or damaged flow. See [references/codegen.md](references/codegen.md). Recorded values, including passwords, are stored verbatim, and unfinished flows survive daemon restarts through an owner-only append-only journal.
 
 ### Iframes
 

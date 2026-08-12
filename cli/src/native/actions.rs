@@ -2071,6 +2071,7 @@ fn skip_launch_action(action: &str) -> bool {
             | "codegen_start"
             | "codegen_stop"
             | "codegen_status"
+            | "codegen_discard"
     )
 }
 
@@ -2432,6 +2433,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "codegen_start" => handle_codegen_start(cmd, state).await,
         "codegen_stop" => handle_codegen_stop(cmd, state).await,
         "codegen_status" => handle_codegen_status(state),
+        "codegen_discard" => handle_codegen_discard(state),
         "pdf" => handle_pdf(cmd, state).await,
         "tab_list" => handle_tab_list(state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
@@ -2545,7 +2547,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     };
 
     if let Ok(ref data) = result {
-        if state.codegen.active {
+        if state.codegen.is_active() {
             let capture_start = state.codegen.steps.len();
             let popup_opened = state.browser.as_ref().is_some_and(|browser| {
                 let tabs = browser.tab_list();
@@ -2622,7 +2624,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                         if let Some(url) = popup_url.as_deref() {
                             codegen::attach_navigation(click, url);
                         }
-                        let _ = codegen::persist(&state.codegen);
+                        let _ = codegen::persist(&mut state.codegen);
                     }
                     if let Some(url) = popup_url {
                         state.codegen.last_url = Some(url);
@@ -2727,7 +2729,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                         }
                     }
                 }
-                let _ = codegen::persist(&state.codegen);
+                let _ = codegen::persist(&mut state.codegen);
             }
         }
     }
@@ -6751,12 +6753,13 @@ async fn handle_codegen_start(cmd: &Value, state: &mut DaemonState) -> Result<Va
                 .iter()
                 .filter_map(|tab| tab.get("tabId").and_then(Value::as_str).map(str::to_string)),
         );
+        let _ = codegen::persist(&mut state.codegen);
     }
     Ok(result)
 }
 
 async fn handle_codegen_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if state.codegen.active {
+    if state.codegen.is_active() {
         if let Some(browser) = state.browser.as_ref() {
             if let Ok(url) = browser.get_url().await {
                 if !codegen::has_frame_scope(
@@ -6772,7 +6775,7 @@ async fn handle_codegen_stop(cmd: &Value, state: &mut DaemonState) -> Result<Val
                     }
                 }
                 state.codegen.last_url = Some(url);
-                let _ = codegen::persist(&state.codegen);
+                let _ = codegen::persist(&mut state.codegen);
             }
         }
     }
@@ -6785,6 +6788,10 @@ async fn handle_codegen_stop(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
 fn handle_codegen_status(state: &DaemonState) -> Result<Value, String> {
     Ok(codegen::codegen_status(&state.codegen))
+}
+
+fn handle_codegen_discard(state: &mut DaemonState) -> Result<Value, String> {
+    codegen::codegen_discard(&mut state.codegen, &state.session_id)
 }
 
 async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -12511,9 +12518,20 @@ mod tests {
     #[tokio::test]
     async fn test_codegen_actions_do_not_require_browser() {
         let mut state = DaemonState::new();
-        // Set up an active capture without touching the user's socket directory.
-        state.codegen.active = true;
-        state.codegen.title = "test".to_string();
+        state.codegen = CodegenState::new();
+        state.session_id = format!(
+            "codegen-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let started = execute_command(
+            &json!({ "id": "0", "action": "codegen_start", "title": "test" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(started["success"], true);
         let status = execute_command(
             &json!({ "id": "1", "action": "codegen_status" }),
             &mut state,
@@ -12528,7 +12546,7 @@ mod tests {
     #[tokio::test]
     async fn test_failed_action_is_not_captured_by_codegen() {
         let mut state = DaemonState::new();
-        state.codegen.active = true;
+        state.codegen.status = codegen::CodegenStatus::Active;
         let response =
             execute_command(&json!({ "id": "1", "action": "codegen_start" }), &mut state).await;
         assert_eq!(response["success"], false);

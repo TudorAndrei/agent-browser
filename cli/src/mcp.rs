@@ -112,6 +112,7 @@ const TOOL_RECORD_RESTART: &str = "agent_browser_record_restart";
 const TOOL_CODEGEN_START: &str = "agent_browser_codegen_start";
 const TOOL_CODEGEN_STOP: &str = "agent_browser_codegen_stop";
 const TOOL_CODEGEN_STATUS: &str = "agent_browser_codegen_status";
+const TOOL_CODEGEN_DISCARD: &str = "agent_browser_codegen_discard";
 const TOOL_CONSOLE: &str = "agent_browser_console";
 const TOOL_ERRORS: &str = "agent_browser_errors";
 const TOOL_HIGHLIGHT: &str = "agent_browser_highlight";
@@ -417,6 +418,7 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_CODEGEN_START,
     TOOL_CODEGEN_STOP,
     TOOL_CODEGEN_STATUS,
+    TOOL_CODEGEN_DISCARD,
     TOOL_A11Y,
     TOOL_CONSOLE,
     TOOL_ERRORS,
@@ -1351,7 +1353,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CODEGEN_STATUS,
             "Codegen status",
-            "Show whether codegen capture is active and its current step count.",
+            "Show codegen recovery state, capture counts, warnings, and cleanup status.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            TOOL_CODEGEN_DISCARD,
+            "Codegen discard",
+            "Discard an active, restored, damaged, or cleanup-pending codegen recording.",
             json!({}),
             &[],
         ),
@@ -2212,6 +2221,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_CODEGEN_START => call_codegen_start(arguments),
         TOOL_CODEGEN_STOP => call_codegen_stop(arguments),
         TOOL_CODEGEN_STATUS => call_literal(arguments, &["codegen", "status"]),
+        TOOL_CODEGEN_DISCARD => call_literal(arguments, &["codegen", "discard"]),
         TOOL_CONSOLE => call_clearable(arguments, "console"),
         TOOL_ERRORS => call_clearable(arguments, "errors"),
         TOOL_HIGHLIGHT => call_simple_selector(arguments, "highlight"),
@@ -4319,6 +4329,21 @@ mod tests {
         assert_eq!(parsed["action"], "codegen_stop");
         assert_eq!(parsed["path"], "flow.spec.ts");
         assert_eq!(parsed["format"], "playwright");
+    }
+
+    #[test]
+    fn codegen_discard_mcp_tool_is_available() {
+        let available_tools = tools();
+        let tool = available_tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_CODEGEN_DISCARD))
+            .unwrap();
+
+        assert_eq!(tool["title"], "Codegen discard");
+        assert!(tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("cleanup-pending"));
     }
 
     #[test]

@@ -1710,7 +1710,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Codegen (Chrome DevTools Recorder / Playwright flows) ===
         "codegen" => {
-            const VALID: &[&str] = &["start", "stop", "status"];
+            const VALID: &[&str] = &["start", "stop", "status", "discard"];
             match rest.first().copied() {
                 Some("start") => {
                     let mut title = None;
@@ -1782,13 +1782,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("status") => Ok(json!({ "id": id, "action": "codegen_status" })),
+                Some("discard") => Ok(json!({ "id": id, "action": "codegen_discard" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "codegen".to_string(),
-                    usage: "codegen <start|stop|status>",
+                    usage: "codegen <start|stop|status|discard>",
                 }),
             }
         }
@@ -4800,6 +4801,8 @@ mod tests {
 
         let status = parse_command(&args("codegen status"), &default_flags()).unwrap();
         assert_eq!(status["action"], "codegen_status");
+        let discard = parse_command(&args("codegen discard"), &default_flags()).unwrap();
+        assert_eq!(discard["action"], "codegen_discard");
         assert!(matches!(
             parse_command(&args("codegen stop --format nope"), &default_flags()),
             Err(ParseError::InvalidValue { .. })

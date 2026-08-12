@@ -282,7 +282,7 @@ Pending confirmations auto-deny after 60 seconds.
 
 ## Codegen artifacts
 
-`codegen` captures typed values verbatim so generated Recorder flows and Playwright specs can replay the original interaction. This includes credentials entered into password fields. Review generated files before sharing or committing them. The in-progress sidecar and capture metadata are stored with owner-only permissions in the daemon socket directory, but they should still be treated as sensitive.
+`codegen` captures typed values verbatim so generated Recorder flows and Playwright specs can replay the original interaction. This includes credentials entered into password fields. Review generated files before sharing or committing them. The in-progress append-only journal is stored with owner-only permissions in the daemon socket directory, but another process running as the same local account can still read it. A successful stop removes the journal. Use `codegen discard` to remove an unfinished, damaged, or cleanup-pending journal.
 
 Prevent context flooding by truncating large page outputs:
 

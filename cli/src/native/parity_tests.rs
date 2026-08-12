@@ -100,6 +100,7 @@ const DOCUMENTED_ACTIONS: &[&str] = &[
     "codegen_start",
     "codegen_stop",
     "codegen_status",
+    "codegen_discard",
     "pdf",
     "tab_list",
     "tab_new",

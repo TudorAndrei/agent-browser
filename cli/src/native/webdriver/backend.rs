@@ -132,6 +132,7 @@ pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
     "codegen_start",
     "codegen_stop",
     "codegen_status",
+    "codegen_discard",
 ];
 
 #[cfg(test)]

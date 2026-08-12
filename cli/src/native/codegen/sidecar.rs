@@ -1,98 +1,833 @@
 use super::Step;
 use crate::connection::get_socket_dir;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Metadata {
+pub const JOURNAL_VERSION: u32 = 1;
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturedStep {
+    pub step_id: u64,
+    pub step: Step,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturedAction {
+    pub action_id: u64,
+    pub action: String,
+    pub steps: Vec<CapturedStep>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", content = "data", rename_all = "kebab-case")]
+pub enum JournalRecord {
+    Start {
+        title: String,
+        last_url: Option<String>,
+    },
+    Action(CapturedAction),
+    UpdateAction(CapturedAction),
+    State {
+        last_url: Option<String>,
+    },
+    Degraded {
+        message: String,
+    },
+    Warning {
+        warning_id: u64,
+        code: String,
+        message: String,
+        action_id: Option<u64>,
+        step_id: Option<u64>,
+    },
+    ResolveWarning {
+        warning_id: u64,
+    },
+    OutputWritten {
+        format: String,
+        path: Option<String>,
+    },
+    DiscardRequested,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalEnvelope {
+    pub version: u32,
+    pub sequence: u64,
+    #[serde(flatten)]
+    pub record: JournalRecord,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TerminalRecord {
+    OutputWritten {
+        format: String,
+        path: Option<String>,
+    },
+    DiscardRequested,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecoveredJournal {
     pub title: String,
     pub last_url: Option<String>,
+    pub actions: Vec<CapturedAction>,
+    pub next_sequence: u64,
+    pub degraded_messages: Vec<String>,
+    pub warnings: Vec<String>,
+    pub terminal: Option<TerminalRecord>,
 }
 
-pub fn create(session_id: &str) -> Result<PathBuf, String> {
-    let dir = get_socket_dir();
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create codegen sidecar directory: {e}"))?;
-    let path = dir.join(format!("{}.codegen.jsonl", session_id));
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .map_err(|e| format!("Failed to create codegen sidecar: {e}"))?;
+pub fn path_for_session(session_id: &str) -> PathBuf {
+    get_socket_dir().join(format!("{session_id}.codegen.jsonl"))
+}
+
+pub fn legacy_metadata_paths(path: &Path) -> [PathBuf; 2] {
+    let session_path = path.with_extension("");
+    [
+        path.with_extension("codegen.meta.json"),
+        session_path.with_extension("codegen.meta.json"),
+    ]
+}
+
+fn ensure_regular_file(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "Failed to inspect codegen journal {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(format!(
+            "Codegen journal is not a regular file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn create(session_id: &str, title: &str) -> Result<(PathBuf, u64), String> {
+    let directory = get_socket_dir();
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Failed to create codegen journal directory: {error}"))?;
+    let path = path_for_session(session_id);
+    if known_paths(&path)
+        .iter()
+        .any(|candidate| candidate.exists())
+    {
+        return Err("A codegen recording already exists for this session. Run `codegen status`, `codegen stop`, or `codegen discard`.".to_string());
+    }
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("Failed to secure codegen sidecar: {e}"))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    Ok(path)
-}
-
-fn metadata_path(path: &Path) -> PathBuf {
-    path.with_extension("codegen.meta.json")
-}
-
-pub fn write_metadata(path: &Path, metadata: &Metadata) -> Result<(), String> {
-    let path = metadata_path(path);
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
+    let file = options
         .open(&path)
-        .map_err(|e| format!("Failed to create codegen metadata: {e}"))?;
+        .map_err(|error| format!("Failed to create codegen journal: {error}"))?;
+    ensure_regular_file(&path)?;
+    drop(file);
+
+    if let Err(error) = append(
+        &path,
+        1,
+        &JournalRecord::Start {
+            title: title.to_string(),
+            last_url: None,
+        },
+    ) {
+        return match fs::remove_file(&path) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}. The new journal also could not be removed: {cleanup_error}"
+            )),
+        };
+    }
+    Ok((path, 2))
+}
+
+pub fn append(path: &Path, sequence: u64, record: &JournalRecord) -> Result<(), String> {
+    ensure_regular_file(path)?;
+    let envelope = JournalEnvelope {
+        version: JOURNAL_VERSION,
+        sequence,
+        record: record.clone(),
+    };
+    let line = serde_json::to_string(&envelope)
+        .map_err(|error| format!("Failed to encode codegen journal record: {error}"))?;
+    let mut options = OpenOptions::new();
+    options.append(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("Failed to secure codegen metadata: {e}"))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
     }
-    serde_json::to_writer(file, metadata)
-        .map_err(|e| format!("Failed to write codegen metadata: {e}"))
-}
-
-pub fn read_metadata(session_id: &str) -> Result<Option<(PathBuf, Metadata)>, String> {
-    let path = get_socket_dir().join(format!("{session_id}.codegen.jsonl"));
-    let metadata_path = metadata_path(&path);
-    if !metadata_path.exists() {
-        return Ok(None);
-    }
-    let file = fs::File::open(&metadata_path)
-        .map_err(|e| format!("Failed to read codegen metadata: {e}"))?;
-    let metadata =
-        serde_json::from_reader(file).map_err(|e| format!("Invalid codegen metadata: {e}"))?;
-    Ok(Some((path, metadata)))
-}
-
-pub fn remove_metadata(path: &Path) {
-    let _ = fs::remove_file(metadata_path(path));
-}
-
-pub fn append(path: &Path, step: &Step) -> Result<(), String> {
-    let line = serde_json::to_string(step).map_err(|e| e.to_string())?;
-    let mut file = OpenOptions::new()
-        .append(true)
+    let mut file = options
         .open(path)
-        .map_err(|e| format!("Failed to open codegen sidecar: {e}"))?;
-    writeln!(file, "{line}").map_err(|e| format!("Failed to append codegen step: {e}"))
+        .map_err(|error| format!("Failed to open codegen journal: {error}"))?;
+    writeln!(file, "{line}")
+        .and_then(|_| file.flush())
+        .map_err(|error| format!("Failed to append codegen journal record: {error}"))
 }
 
-pub fn read(path: &Path) -> Result<Vec<Step>, String> {
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("Failed to read codegen sidecar: {e}"))?;
-    content
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_str(line).map_err(|e| format!("Invalid codegen sidecar: {e}")))
+pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
+    ensure_regular_file(path)?;
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Failed to inspect codegen journal: {error}"))?;
+    if metadata.len() > MAX_JOURNAL_BYTES {
+        return Err(format!(
+            "Codegen journal exceeds the 64 MiB recovery limit: {}",
+            path.display()
+        ));
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read codegen journal: {error}"))?;
+    let has_final_newline = content.ends_with('\n');
+    let raw_lines: Vec<&str> = content.split('\n').collect();
+    let mut expected_sequence = 1u64;
+    let mut title = None;
+    let mut last_url = None;
+    let mut actions = BTreeMap::<u64, CapturedAction>::new();
+    let mut degraded_messages = Vec::new();
+    let mut warnings = BTreeMap::<u64, String>::new();
+    let mut terminal = None;
+
+    for (index, line) in raw_lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let is_last_content_line = index == raw_lines.len() - 1;
+        let envelope: JournalEnvelope = match serde_json::from_str(line) {
+            Ok(envelope) => envelope,
+            Err(_error) if is_last_content_line && !has_final_newline => break,
+            Err(error) if expected_sequence == 1 => {
+                return Err(format!(
+                    "Unsupported codegen journal from an earlier development build: {error}"
+                ))
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Invalid complete codegen journal record at line {}: {error}",
+                    index + 1
+                ))
+            }
+        };
+        if envelope.version != JOURNAL_VERSION {
+            return Err(format!(
+                "Unsupported codegen journal version {}. Expected version {}.",
+                envelope.version, JOURNAL_VERSION
+            ));
+        }
+        if envelope.sequence != expected_sequence {
+            return Err(format!(
+                "Invalid codegen journal sequence at line {}. Expected {}, found {}.",
+                index + 1,
+                expected_sequence,
+                envelope.sequence
+            ));
+        }
+        if terminal.is_some() {
+            return Err(format!(
+                "Codegen journal contains a record after its terminal record at line {}.",
+                index + 1
+            ));
+        }
+        match envelope.record {
+            JournalRecord::Start {
+                title: start_title,
+                last_url: start_url,
+            } => {
+                if expected_sequence != 1 {
+                    return Err("Codegen journal contains more than one start record.".to_string());
+                }
+                title = Some(start_title);
+                last_url = start_url;
+            }
+            JournalRecord::Action(action) => {
+                if title.is_none() {
+                    return Err("Codegen journal does not start with a start record.".to_string());
+                }
+                if actions.insert(action.action_id, action).is_some() {
+                    return Err("Codegen journal contains a duplicate action ID.".to_string());
+                }
+            }
+            JournalRecord::UpdateAction(action) => {
+                let Some(existing) = actions.get_mut(&action.action_id) else {
+                    return Err(format!(
+                        "Codegen journal updates unknown action {}.",
+                        action.action_id
+                    ));
+                };
+                let existing_step_ids = existing
+                    .steps
+                    .iter()
+                    .map(|step| step.step_id)
+                    .collect::<Vec<_>>();
+                let updated_step_ids = action
+                    .steps
+                    .iter()
+                    .map(|step| step.step_id)
+                    .collect::<Vec<_>>();
+                if existing_step_ids != updated_step_ids {
+                    return Err(format!(
+                        "Codegen journal update for action {} changes or references unknown step IDs.",
+                        action.action_id
+                    ));
+                }
+                *existing = action;
+            }
+            JournalRecord::State {
+                last_url: updated_url,
+            } => last_url = updated_url,
+            JournalRecord::Degraded { message } => degraded_messages.push(message),
+            JournalRecord::Warning {
+                warning_id,
+                message,
+                ..
+            } => {
+                if warnings.insert(warning_id, message).is_some() {
+                    return Err(format!(
+                        "Codegen journal contains duplicate warning ID {warning_id}."
+                    ));
+                }
+            }
+            JournalRecord::ResolveWarning { warning_id } => {
+                if warnings.remove(&warning_id).is_none() {
+                    return Err(format!(
+                        "Codegen journal resolves unknown warning {warning_id}."
+                    ));
+                }
+            }
+            JournalRecord::OutputWritten { format, path } => {
+                terminal = Some(TerminalRecord::OutputWritten { format, path });
+            }
+            JournalRecord::DiscardRequested => {
+                terminal = Some(TerminalRecord::DiscardRequested);
+            }
+        }
+        expected_sequence += 1;
+    }
+
+    let title = title.ok_or_else(|| "Codegen journal is missing its start record.".to_string())?;
+    Ok(RecoveredJournal {
+        title,
+        last_url,
+        actions: actions.into_values().collect(),
+        next_sequence: expected_sequence,
+        degraded_messages,
+        warnings: warnings.into_values().collect(),
+        terminal,
+    })
+}
+
+pub fn known_paths(path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![path.to_path_buf()];
+    paths.extend(legacy_metadata_paths(path));
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+pub fn existing_known_paths(path: &Path) -> Vec<PathBuf> {
+    known_paths(path)
+        .into_iter()
+        .filter(|candidate| fs::symlink_metadata(candidate).is_ok())
         .collect()
 }
 
-pub fn rewrite(path: &Path, steps: &[Step]) -> Result<(), String> {
-    let mut output = String::new();
-    for step in steps {
-        output.push_str(&serde_json::to_string(step).map_err(|e| e.to_string())?);
-        output.push('\n');
+pub fn remove_known_files(path: &Path) -> Result<(), Vec<PathBuf>> {
+    let mut remaining = Vec::new();
+    for candidate in known_paths(path) {
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata)
+                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
+            {
+                if fs::remove_file(&candidate).is_err() {
+                    remaining.push(candidate);
+                }
+            }
+            Ok(_) => remaining.push(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => remaining.push(candidate),
+        }
     }
-    fs::write(path, output).map_err(|e| format!("Failed to rewrite codegen sidecar: {e}"))
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(remaining)
+    }
+}
+
+pub fn write_output_atomic(path: &Path, output: &str) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Codegen output path must have a valid file name.".to_string())?;
+    let existing_permissions = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            Some(metadata.permissions())
+        }
+        Ok(_) => {
+            return Err(format!(
+                "Codegen output is not a regular file: {}",
+                path.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Failed to inspect codegen output: {error}")),
+    };
+    let mut temporary_path = None;
+    let mut temporary_file = None;
+    for attempt in 0..100u32 {
+        let candidate = parent.join(format!(
+            ".{file_name}.agent-browser-codegen-{}-{attempt}.tmp",
+            std::process::id()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                temporary_path = Some(candidate);
+                temporary_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Failed to create codegen output: {error}")),
+        }
+    }
+    let temporary_path = temporary_path
+        .ok_or_else(|| "Failed to allocate a temporary codegen output path.".to_string())?;
+    let mut temporary_file = temporary_file.expect("temporary file accompanies its path");
+    let write_result = (|| {
+        temporary_file
+            .write_all(output.as_bytes())
+            .and_then(|_| temporary_file.flush())
+            .map_err(|error| format!("Failed to write codegen output: {error}"))?;
+        if let Some(permissions) = existing_permissions {
+            fs::set_permissions(&temporary_path, permissions)
+                .map_err(|error| format!("Failed to preserve output permissions: {error}"))?;
+        }
+        drop(temporary_file);
+        fs::rename(&temporary_path, path)
+            .map_err(|error| format!("Failed to install codegen output: {error}"))
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    write_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native::codegen::Scope;
+
+    fn viewport() -> Step {
+        Step::SetViewport {
+            width: 1280,
+            height: 720,
+            device_scale_factor: 1.0,
+            is_mobile: false,
+        }
+    }
+
+    fn captured(step_id: u64, step: Step) -> CapturedStep {
+        CapturedStep { step_id, step }
+    }
+
+    fn envelope(sequence: u64, record: JournalRecord) -> String {
+        serde_json::to_string(&JournalEnvelope {
+            version: JOURNAL_VERSION,
+            sequence,
+            record,
+        })
+        .unwrap()
+    }
+
+    fn start() -> JournalRecord {
+        JournalRecord::Start {
+            title: "flow".to_string(),
+            last_url: None,
+        }
+    }
+
+    #[test]
+    fn recovers_actions_and_latest_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        append(
+            &path,
+            1,
+            &JournalRecord::Start {
+                title: "checkout".to_string(),
+                last_url: None,
+            },
+        )
+        .unwrap();
+        append(
+            &path,
+            2,
+            &JournalRecord::Action(CapturedAction {
+                action_id: 1,
+                action: "viewport".to_string(),
+                steps: vec![captured(1, viewport())],
+            }),
+        )
+        .unwrap();
+        append(
+            &path,
+            3,
+            &JournalRecord::UpdateAction(CapturedAction {
+                action_id: 1,
+                action: "viewport".to_string(),
+                steps: vec![captured(
+                    1,
+                    Step::KeyDown {
+                        key: "Enter".to_string(),
+                        scope: Scope::default(),
+                    },
+                )],
+            }),
+        )
+        .unwrap();
+
+        let recovered = recover(&path).unwrap();
+
+        assert_eq!(recovered.title, "checkout");
+        assert_eq!(recovered.next_sequence, 4);
+        assert_eq!(recovered.actions.len(), 1);
+        assert_eq!(recovered.actions[0].steps.len(), 1);
+        assert!(matches!(
+            recovered.actions[0].steps[0].step,
+            Step::KeyDown { .. }
+        ));
+    }
+
+    #[test]
+    fn ignores_only_an_incomplete_final_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{{\"version\":1",
+                serde_json::to_string(&JournalEnvelope {
+                    version: JOURNAL_VERSION,
+                    sequence: 1,
+                    record: JournalRecord::Start {
+                        title: "flow".to_string(),
+                        last_url: None,
+                    },
+                })
+                .unwrap()
+            ),
+        )
+        .unwrap();
+
+        let recovered = recover(&path).unwrap();
+
+        assert_eq!(recovered.next_sequence, 2);
+    }
+
+    #[test]
+    fn rejects_a_malformed_complete_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\nnot-json\n",
+                serde_json::to_string(&JournalEnvelope {
+                    version: JOURNAL_VERSION,
+                    sequence: 1,
+                    record: JournalRecord::Start {
+                        title: "flow".to_string(),
+                        last_url: None,
+                    },
+                })
+                .unwrap()
+            ),
+        )
+        .unwrap();
+
+        assert!(recover(&path)
+            .unwrap_err()
+            .contains("Invalid complete codegen journal record"));
+    }
+
+    #[test]
+    fn rejects_an_update_for_an_unknown_action() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        fs::write(&path, "").unwrap();
+        append(
+            &path,
+            1,
+            &JournalRecord::Start {
+                title: "flow".to_string(),
+                last_url: None,
+            },
+        )
+        .unwrap();
+        append(
+            &path,
+            2,
+            &JournalRecord::UpdateAction(CapturedAction {
+                action_id: 7,
+                action: "click".to_string(),
+                steps: vec![],
+            }),
+        )
+        .unwrap();
+
+        assert!(recover(&path)
+            .unwrap_err()
+            .contains("updates unknown action 7"));
+    }
+
+    #[test]
+    fn rejects_missing_and_duplicate_sequences() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, second_sequence) in [("missing", 3), ("duplicate", 1)] {
+            let path = directory.path().join(format!("{name}.jsonl"));
+            fs::write(
+                &path,
+                format!(
+                    "{}\n{}\n",
+                    envelope(1, start()),
+                    envelope(second_sequence, JournalRecord::State { last_url: None })
+                ),
+            )
+            .unwrap();
+            assert!(recover(&path).unwrap_err().contains("sequence"));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_versions_and_step_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let version_path = directory.path().join("version.jsonl");
+        fs::write(
+            &version_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&JournalEnvelope {
+                    version: JOURNAL_VERSION + 1,
+                    sequence: 1,
+                    record: start(),
+                })
+                .unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(recover(&version_path).unwrap_err().contains("version"));
+
+        let step_path = directory.path().join("step.jsonl");
+        fs::write(&step_path, "").unwrap();
+        append(&step_path, 1, &start()).unwrap();
+        append(
+            &step_path,
+            2,
+            &JournalRecord::Action(CapturedAction {
+                action_id: 1,
+                action: "viewport".to_string(),
+                steps: vec![captured(1, viewport())],
+            }),
+        )
+        .unwrap();
+        append(
+            &step_path,
+            3,
+            &JournalRecord::UpdateAction(CapturedAction {
+                action_id: 1,
+                action: "viewport".to_string(),
+                steps: vec![captured(2, viewport())],
+            }),
+        )
+        .unwrap();
+        assert!(recover(&step_path)
+            .unwrap_err()
+            .contains("unknown step IDs"));
+    }
+
+    #[test]
+    fn rejects_oversized_and_old_development_files_without_value_leaks() {
+        let directory = tempfile::tempdir().unwrap();
+        let oversized = directory.path().join("oversized.jsonl");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&oversized)
+            .unwrap();
+        file.set_len(MAX_JOURNAL_BYTES + 1).unwrap();
+        assert!(recover(&oversized).unwrap_err().contains("64 MiB"));
+
+        let old = directory.path().join("old.jsonl");
+        fs::write(&old, "{\"type\":\"change\",\"value\":\"TOP_SECRET\"}\n").unwrap();
+        let error = recover(&old).unwrap_err();
+        assert!(error.contains("earlier development build"));
+        assert!(!error.contains("TOP_SECRET"));
+    }
+
+    #[test]
+    fn restores_only_unresolved_warnings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("warnings.jsonl");
+        fs::write(&path, "").unwrap();
+        append(&path, 1, &start()).unwrap();
+        append(
+            &path,
+            2,
+            &JournalRecord::Warning {
+                warning_id: 1,
+                code: "omitted-action".to_string(),
+                message: "One action was omitted.".to_string(),
+                action_id: Some(2),
+                step_id: None,
+            },
+        )
+        .unwrap();
+        append(&path, 3, &JournalRecord::ResolveWarning { warning_id: 1 }).unwrap();
+
+        assert!(recover(&path).unwrap().warnings.is_empty());
+    }
+
+    #[test]
+    fn refuses_directories_as_journals_and_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("directory");
+        fs::create_dir(&path).unwrap();
+
+        assert!(recover(&path).unwrap_err().contains("regular file"));
+        assert!(write_output_atomic(&path, "flow")
+            .unwrap_err()
+            .contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_remove_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let link = directory.path().join("flow.codegen.jsonl");
+        fs::write(&target, "secret").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let remaining = remove_known_files(&link).unwrap_err();
+
+        assert_eq!(remaining, vec![link]);
+        assert_eq!(fs::read_to_string(target).unwrap(), "secret");
+    }
+
+    #[test]
+    fn atomically_writes_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.json");
+
+        write_output_atomic(&path, "first").unwrap();
+        write_output_atomic(&path, "second").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_private_files_and_preserves_replacement_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.json");
+        write_output_atomic(&path, "first").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        write_output_atomic(&path, "second").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_a_private_journal_and_rejects_an_existing_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let session = format!("codegen-sidecar-test-{}-{suffix}", std::process::id());
+        let (path, _) = create(&session, "flow").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        remove_known_files(&path).unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        fs::write(&target, "safe").unwrap();
+        symlink(&target, &path).unwrap();
+        let error = create(&session, "flow").unwrap_err();
+        assert!(error.contains("already exists") || error.contains("create codegen journal"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "safe");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_special_journal_file() {
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        let _listener = UnixListener::bind(&path).unwrap();
+
+        assert!(recover(&path).unwrap_err().contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_replace_an_output_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let link = directory.path().join("flow.json");
+        fs::write(&target, "secret").unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(write_output_atomic(&link, "flow")
+            .unwrap_err()
+            .contains("regular file"));
+        assert_eq!(fs::read_to_string(target).unwrap(), "secret");
+    }
 }

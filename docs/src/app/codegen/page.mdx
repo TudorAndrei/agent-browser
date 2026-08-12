@@ -29,6 +29,7 @@ agent-browser codegen stop ./login.spec.ts --format playwright
     <tr><td><code>codegen start [--title &lt;title&gt;]</code></td><td>Start capturing successful actions</td></tr>
     <tr><td><code>codegen stop [path] [--format json|playwright]</code></td><td>Print or write the generated flow</td></tr>
     <tr><td><code>codegen status</code></td><td>Show active capture state and step count</td></tr>
+    <tr><td><code>codegen discard</code></td><td>Remove an unfinished, damaged, or cleanup-pending recording</td></tr>
   </tbody>
 </table>
 
@@ -38,4 +39,4 @@ Popup targets and iframe paths are preserved when exporting either Recorder JSON
 
 ## Security
 
-Typed values are included verbatim for replay fidelity, including password values. The in-progress sidecar and its capture metadata are stored with owner-only permissions in the daemon socket directory, so an unfinished flow survives a daemon restart. Inspect generated artifacts and do not commit credentials.
+Typed values are included verbatim for replay fidelity, including password values. The in-progress append-only journal is stored with owner-only permissions in the daemon socket directory, so an unfinished flow survives a daemon restart. Use `codegen status` to inspect its recovery state and `codegen discard` to remove it. A successful stop removes the journal. Inspect generated artifacts and do not commit credentials.
