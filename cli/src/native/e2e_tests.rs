@@ -772,6 +772,323 @@ async fn e2e_codegen_attaches_navigation_to_its_last_step() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_probes_css_password_and_unnamed_ref() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-probe-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-probe");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<main><button></button><button id=unique-id>Named</button><button data-testid=unique-test>Test</button><button id=duplicate-one data-testid=duplicate-test>First</button><button data-testid=duplicate-test>Second</button><input id=password type=password></main>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let unnamed_ref = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .find(|(_, entry)| entry.role == "button" && entry.name.is_empty())
+        .map(|(reference, _)| format!("@{reference}"))
+        .expect("unnamed button should have a snapshot ref");
+    let before_inactive = state.browser.as_ref().unwrap().client.command_count();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4a", "action": "fill", "selector": "#password", "value": "before" }),
+            &mut state,
+        )
+        .await,
+    );
+    let inactive_delta = state.browser.as_ref().unwrap().client.command_count() - before_inactive;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "codegen_start", "title": "probe" }),
+            &mut state,
+        )
+        .await,
+    );
+    let manager = state.browser.as_ref().unwrap();
+    let session_id = manager.active_session_id().unwrap().to_string();
+    let resolved = super::element::resolve_element(
+        &manager.client,
+        &session_id,
+        &state.ref_map,
+        "#password",
+        &state.iframe_sessions,
+    )
+    .await
+    .unwrap();
+    let direct_capture =
+        super::codegen::probe::capture_resolved_element(&manager.client, &session_id, &resolved)
+            .await;
+    assert_eq!(
+        direct_capture
+            .probe
+            .as_ref()
+            .and_then(|probe| probe.input_type.as_deref()),
+        Some("password"),
+        "exact object probe failed: {direct_capture:?}"
+    );
+    let before_active = state.browser.as_ref().unwrap().client.command_count();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "fill", "selector": "#password", "value": "TOP_SECRET" }),
+            &mut state,
+        )
+        .await,
+    );
+    let active_delta = state.browser.as_ref().unwrap().client.command_count() - before_active;
+    assert!(
+        active_delta <= inactive_delta + 3,
+        "active codegen added more than three CDP commands: inactive={inactive_delta}, active={active_delta}"
+    );
+    assert!(
+        matches!(
+            state.codegen.steps.last(),
+            Some(super::codegen::Step::Fill { target, .. })
+                if target.input_type.as_deref() == Some("password")
+        ),
+        "CSS password fill was not enriched: {:?}",
+        state.codegen.steps.last()
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "click", "selector": unnamed_ref }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6a", "action": "click", "selector": "#unique-id" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6b", "action": "click", "selector": "[data-testid=unique-test]" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6c", "action": "click", "selector": "#duplicate-one" }),
+            &mut state,
+        )
+        .await,
+    );
+    let targets = state
+        .codegen
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            super::codegen::Step::Pointer { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(targets.iter().any(|target| {
+        target.selectors.iter().any(|selector| {
+            matches!(selector, super::codegen::SelectorKind::Css { value } if value.contains(":nth-of-type("))
+        })
+    }));
+    assert!(targets.iter().any(|target| {
+        target.selectors.iter().any(|selector| {
+            matches!(selector, super::codegen::SelectorKind::Css { value } if value == "#unique-id")
+        })
+    }));
+    assert!(targets.iter().any(|target| {
+        target.selectors.iter().any(|selector| {
+            matches!(selector, super::codegen::SelectorKind::TestId { value } if value == "unique-test")
+        })
+    }));
+    assert!(targets.iter().any(|target| {
+        target.selectors.iter().any(|selector| {
+            matches!(selector, super::codegen::SelectorKind::Css { value } if value == "#duplicate-one")
+        }) && !target.selectors.iter().any(|selector| {
+            matches!(selector, super::codegen::SelectorKind::TestId { value } if value == "duplicate-test")
+        })
+    }));
+    let stop = execute_command(
+        &json!({ "id": "7", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let data = get_data(&stop);
+    let warnings = data["captureErrors"]
+        .as_array()
+        .expect("capture warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.starts_with("password-value-stored:"))),
+        "expected a password warning, got {warnings:?}"
+    );
+    assert!(!serde_json::to_string(warnings)
+        .unwrap()
+        .contains("TOP_SECRET"));
+    let click = data["flow"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["type"] == "click")
+        .expect("click step should be emitted");
+    assert!(!click["selectors"].as_array().unwrap().is_empty());
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_captures_nested_same_process_and_oopif_scope() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-frames-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-frames");
+    let (port, server) = start_a11y_frame_server().await;
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--site-per-process", "--host-resolver-rules=MAP localhost 127.0.0.1"] }),
+            &mut state,
+        )
+        .await,
+    );
+
+    for (case, host) in [("same", "127.0.0.1"), ("oopif", "127.0.0.1")] {
+        let route = if case == "same" {
+            "codegen-same-top"
+        } else {
+            "codegen-oopif-top"
+        };
+        assert_success(
+            &execute_command(
+                &json!({ "id": format!("{case}-navigate"), "action": "navigate", "url": format!("http://{host}:{port}/{route}") }),
+                &mut state,
+            )
+            .await,
+        );
+        let oopif_ref = if case == "oopif" {
+            assert_success(
+                &execute_command(
+                    &json!({ "id": "oopif-snapshot", "action": "snapshot", "interactive": true }),
+                    &mut state,
+                )
+                .await,
+            );
+            Some(
+                state
+                    .ref_map
+                    .entries_sorted()
+                    .into_iter()
+                    .find(|(_, entry)| entry.name == "Outer")
+                    .map(|(reference, _)| format!("@{reference}"))
+                    .expect("outer OOPIF should have a snapshot ref"),
+            )
+        } else {
+            None
+        };
+        assert_success(
+            &execute_command(
+                &json!({ "id": format!("{case}-start"), "action": "codegen_start", "title": case }),
+                &mut state,
+            )
+            .await,
+        );
+        let selected_frame = if case == "same" {
+            "/codegen-inner"
+        } else {
+            "/codegen-outer"
+        };
+        let selected_element = if case == "same" {
+            "#inside"
+        } else {
+            "#outer-inside"
+        };
+        let frame_command = oopif_ref.as_ref().map_or_else(
+            || json!({ "id": format!("{case}-frame"), "action": "frame", "url": selected_frame }),
+            |selector| json!({ "id": format!("{case}-frame"), "action": "frame", "selector": selector }),
+        );
+        assert_success(&execute_command(&frame_command, &mut state).await);
+        state.drain_cdp_events_background().await.unwrap();
+        assert_success(
+            &execute_command(
+                &json!({ "id": format!("{case}-click"), "action": "click", "selector": selected_element }),
+                &mut state,
+            )
+            .await,
+        );
+        let expected_frame = if case == "same" { vec![0, 0] } else { vec![0] };
+        assert!(matches!(
+            state.codegen.steps.last(),
+            Some(super::codegen::Step::Pointer { scope, .. }) if scope.frame == expected_frame
+        ));
+        if case == "oopif" {
+            let frame_id = state.active_frame_id.as_deref().unwrap();
+            assert!(
+                state.iframe_sessions.contains_key(frame_id),
+                "selected cross-site frame should use an OOPIF session"
+            );
+        }
+        assert_success(
+            &execute_command(
+                &json!({ "id": format!("{case}-main"), "action": "mainframe" }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({ "id": format!("{case}-stop"), "action": "codegen_stop", "format": "json" }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
@@ -7434,6 +7751,32 @@ async fn start_a11y_frame_server() -> (u16, tokio::task::JoinHandle<()>) {
                         "text/html",
                         r#"<!doctype html><html lang="en"><head><title>Background frame</title></head>
 <body><main><h1>Background frame</h1><img id="background-image" src="/missing-background.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/codegen-same-top" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><body><iframe name="outer" src="http://127.0.0.1:{port}/codegen-outer"></iframe></body>"#
+                        ),
+                    ),
+                    "/codegen-oopif-top" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><body><iframe name="outer" title="Outer" src="http://localhost:{port}/codegen-outer"></iframe></body>"#
+                        ),
+                    ),
+                    "/codegen-outer" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><body><button id="outer-inside">Outer</button><iframe name="inner" src="/codegen-inner"></iframe></body>"#
+                            .to_string(),
+                    ),
+                    "/codegen-inner" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><body><button id="inside">Inside</button></body>"#
                             .to_string(),
                     ),
                     _ => ("404 Not Found", "text/plain", "not found".to_string()),

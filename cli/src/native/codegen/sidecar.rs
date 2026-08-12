@@ -80,6 +80,7 @@ pub struct RecoveredJournal {
     pub last_url: Option<String>,
     pub actions: Vec<CapturedAction>,
     pub next_sequence: u64,
+    pub next_warning_id: u64,
     pub degraded_messages: Vec<String>,
     pub warnings: Vec<String>,
     pub terminal: Option<TerminalRecord>,
@@ -200,6 +201,7 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
     let mut actions = BTreeMap::<u64, CapturedAction>::new();
     let mut degraded_messages = Vec::new();
     let mut warnings = BTreeMap::<u64, String>::new();
+    let mut next_warning_id = 1u64;
     let mut terminal = None;
 
     for (index, line) in raw_lines.iter().enumerate() {
@@ -292,16 +294,22 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
             JournalRecord::Degraded { message } => degraded_messages.push(message),
             JournalRecord::Warning {
                 warning_id,
+                code,
                 message,
                 ..
             } => {
-                if warnings.insert(warning_id, message).is_some() {
+                next_warning_id = next_warning_id.max(warning_id + 1);
+                if warnings
+                    .insert(warning_id, format!("{code}: {message}"))
+                    .is_some()
+                {
                     return Err(format!(
                         "Codegen journal contains duplicate warning ID {warning_id}."
                     ));
                 }
             }
             JournalRecord::ResolveWarning { warning_id } => {
+                next_warning_id = next_warning_id.max(warning_id + 1);
                 if warnings.remove(&warning_id).is_none() {
                     return Err(format!(
                         "Codegen journal resolves unknown warning {warning_id}."
@@ -324,6 +332,7 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
         last_url,
         actions: actions.into_values().collect(),
         next_sequence: expected_sequence,
+        next_warning_id,
         degraded_messages,
         warnings: warnings.into_values().collect(),
         terminal,
@@ -777,9 +786,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn creates_a_private_journal_and_rejects_an_existing_symlink() {
+        use crate::test_utils::EnvGuard;
         use std::os::unix::fs::{symlink, PermissionsExt};
         use std::time::{SystemTime, UNIX_EPOCH};
 
+        let directory = tempfile::tempdir().unwrap();
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -792,7 +808,6 @@ mod tests {
         );
         remove_known_files(&path).unwrap();
 
-        let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("target");
         fs::write(&target, "safe").unwrap();
         symlink(&target, &path).unwrap();
@@ -802,16 +817,24 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn rejects_a_special_journal_file() {
         use std::os::unix::net::UnixListener;
 
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("flow.codegen.jsonl");
+        let path = std::env::temp_dir().join(format!(
+            "ab-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
         let _listener = UnixListener::bind(&path).unwrap();
 
         assert!(recover(&path).unwrap_err().contains("regular file"));
+        drop(_listener);
+        fs::remove_file(&path).unwrap();
     }
 
     #[cfg(unix)]

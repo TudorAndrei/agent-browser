@@ -2774,7 +2774,8 @@ Usage: agent-browser codegen start [--title <title>]
        agent-browser codegen status
        agent-browser codegen discard
 
-Capture successful agent-browser actions as Chrome DevTools Recorder JSON. Use
+Capture supported successful actions as Chrome DevTools Recorder JSON. Unsafe
+targets and unsupported actions are omitted and reported as warnings. Use
 --format playwright to emit an @playwright/test spec. Unlike `record`, which
 creates a video, codegen creates a replayable test artifact.
 

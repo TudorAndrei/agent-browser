@@ -2,8 +2,10 @@ use crate::native::cdp::client::CdpClient;
 use crate::native::cdp::types::{
     CallFunctionOnParams, DomResolveNodeParams, DomResolveNodeResult, EvaluateResult,
 };
+use crate::native::element::ResolvedElement;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Probe {
     pub selector: Option<String>,
     pub test_id: Option<String>,
@@ -11,12 +13,24 @@ pub struct Probe {
     pub input_type: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementCapture {
+    pub probe: Option<Probe>,
+    pub frame: Option<Vec<usize>>,
+    pub probe_failed: bool,
+    pub frame_probe_failed: bool,
+    pub position: Option<(f64, f64)>,
+    pub scroll_delta: Option<(f64, f64)>,
+}
+
 const ELEMENT_PROBE: &str = r#"function() {
   const esc = (value) => CSS.escape(value);
   const unique = (selector) => { try { return document.querySelectorAll(selector).length === 1; } catch { return false; } };
+  const testId = this.getAttribute('data-testid');
+  const usableTestId = testId && unique(`[data-testid="${esc(testId)}"]`) ? testId : null;
   const selector = (() => {
-    const testId = this.getAttribute('data-testid');
-    if (testId) return `[data-testid="${esc(testId)}"]`;
+    if (usableTestId) return `[data-testid="${esc(usableTestId)}"]`;
     if (this.id && unique(`#${esc(this.id)}`)) return `#${esc(this.id)}`;
     const parts = [];
     let node = this;
@@ -33,7 +47,7 @@ const ELEMENT_PROBE: &str = r#"function() {
     }
     return parts.join(' > ');
   })();
-  return { selector, testId: this.getAttribute('data-testid') || null, href: location.href, type: this instanceof HTMLInputElement ? this.type : null };
+  return { selector, testId: usableTestId, href: location.href, type: this instanceof HTMLInputElement ? this.type : null };
 }"#;
 
 pub async fn probe_element(
@@ -56,12 +70,21 @@ pub async fn probe_element(
         .object
         .object_id
         .ok_or("Could not resolve codegen element")?;
+    probe_element_object(client, session_id, &object_id).await
+}
+
+/// Probe the exact DOM object that an interaction already resolved.
+pub async fn probe_element_object(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<Probe, String> {
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
                 function_declaration: ELEMENT_PROBE.to_string(),
-                object_id: Some(object_id),
+                object_id: Some(object_id.to_string()),
                 arguments: None,
                 return_by_value: Some(true),
                 await_promise: Some(false),
@@ -69,8 +92,20 @@ pub async fn probe_element(
             Some(session_id),
         )
         .await?;
+    if let Some(details) = result.exception_details {
+        let message = details
+            .exception
+            .as_ref()
+            .and_then(|exception| exception.description.as_deref())
+            .unwrap_or(&details.text);
+        return Err(format!("Codegen element probe failed: {message}"));
+    }
     let value = result.result.value.unwrap_or_default();
-    Ok(Probe {
+    Ok(probe_from_value(&value))
+}
+
+fn probe_from_value(value: &serde_json::Value) -> Probe {
+    Probe {
         selector: value
             .get("selector")
             .and_then(|v| v.as_str())
@@ -87,7 +122,29 @@ pub async fn probe_element(
             .get("type")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-    })
+    }
+}
+
+/// Capture selector and frame facts before an action can replace the element.
+/// Probe errors are capture warnings and never change browser action success.
+pub async fn capture_resolved_element(
+    client: &CdpClient,
+    top_session_id: &str,
+    resolved: &ResolvedElement,
+) -> ElementCapture {
+    let probe = probe_element_object(client, &resolved.session_id, &resolved.object_id).await;
+    let frame = match resolved.frame_id.as_deref() {
+        Some(frame_id) => Some(frame_index_path(client, top_session_id, frame_id).await),
+        None => None,
+    };
+    ElementCapture {
+        probe_failed: probe.is_err(),
+        probe: probe.ok(),
+        frame_probe_failed: frame.as_ref().is_some_and(Result::is_err),
+        frame: frame.and_then(Result::ok),
+        position: None,
+        scroll_delta: None,
+    }
 }
 
 pub async fn probe_url(client: &CdpClient, session_id: &str) -> Result<String, String> {
@@ -120,8 +177,76 @@ pub async fn frame_index_path(
     let root = tree
         .get("frameTree")
         .ok_or("Could not read frame tree for codegen")?;
-    frame_index_path_in_tree(root, frame_id)
-        .ok_or_else(|| "Active frame is not in the page frame tree".to_string())
+    if let Some(path) = frame_index_path_in_tree(root, frame_id) {
+        return Ok(path);
+    }
+    frame_owner_index_path(client, session_id, frame_id).await
+}
+
+async fn frame_owner_index_path(
+    client: &CdpClient,
+    session_id: &str,
+    frame_id: &str,
+) -> Result<Vec<usize>, String> {
+    let owner = client
+        .send_command(
+            "DOM.getFrameOwner",
+            Some(serde_json::json!({ "frameId": frame_id })),
+            Some(session_id),
+        )
+        .await?;
+    let backend_node_id = owner
+        .get("backendNodeId")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("Frame owner has no backend node ID")?;
+    let resolved: DomResolveNodeResult = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_group: Some("agent-browser-codegen".to_string()),
+            },
+            Some(session_id),
+        )
+        .await?;
+    let object_id = resolved
+        .object
+        .object_id
+        .ok_or("Could not resolve the frame owner")?;
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function() {
+                    const path = [];
+                    let frame = this;
+                    while (frame) {
+                        const frames = Array.from(frame.ownerDocument.querySelectorAll('iframe, frame'));
+                        const index = frames.indexOf(frame);
+                        if (index < 0) throw new Error('Frame owner is not in DOM frame order');
+                        path.unshift(index);
+                        frame = frame.ownerDocument.defaultView.frameElement;
+                    }
+                    return path;
+                }"#
+                .to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    if let Some(details) = result.exception_details {
+        return Err(format!(
+            "Could not calculate frame owner path: {}",
+            details.text
+        ));
+    }
+    serde_json::from_value(result.result.value.unwrap_or_default())
+        .map_err(|error| format!("Could not decode frame owner path: {error}"))
 }
 
 fn frame_index_path_in_tree(tree: &serde_json::Value, wanted: &str) -> Option<Vec<usize>> {
@@ -155,16 +280,21 @@ fn frame_index_path_in_tree(tree: &serde_json::Value, wanted: &str) -> Option<Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_index_path_in_tree, ELEMENT_PROBE};
+    use super::{frame_index_path_in_tree, probe_from_value};
     use serde_json::json;
 
     #[test]
-    fn probe_prefers_test_id_then_id_then_positional_selector() {
-        let test_id = ELEMENT_PROBE.find("data-testid").unwrap();
-        let id = ELEMENT_PROBE.find("this.id").unwrap();
-        let positional = ELEMENT_PROBE.find("nth-of-type").unwrap();
-        assert!(test_id < id);
-        assert!(id < positional);
+    fn decodes_exact_probe_result_without_inventing_selector_data() {
+        let probe = probe_from_value(&json!({
+            "selector": "button:nth-of-type(2)",
+            "testId": null,
+            "href": "https://example.com",
+            "type": "password"
+        }));
+
+        assert_eq!(probe.selector.as_deref(), Some("button:nth-of-type(2)"));
+        assert_eq!(probe.test_id, None);
+        assert_eq!(probe.input_type.as_deref(), Some("password"));
     }
 
     #[test]

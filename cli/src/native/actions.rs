@@ -2373,7 +2373,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    let result = match action {
+    let mut result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
         "read" => handle_read(cmd, state).await,
@@ -2546,6 +2546,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
+    let element_capture = result.as_mut().ok().and_then(codegen::take_private_capture);
+
     if let Ok(ref data) = result {
         if state.codegen.is_active() {
             let capture_start = state.codegen.steps.len();
@@ -2613,13 +2615,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                                 tab.get("url").and_then(Value::as_str).map(str::to_string)
                             })
                     });
-                    if let Some(click) = state
-                        .codegen
-                        .steps
-                        .iter_mut()
-                        .rev()
-                        .find(|step| matches!(step, codegen::Step::Click { .. }))
-                    {
+                    if let Some(click) = state.codegen.steps.iter_mut().rev().find(|step| {
+                        matches!(
+                            step,
+                            codegen::Step::Click { .. } | codegen::Step::Pointer { .. }
+                        )
+                    }) {
                         codegen::mark_popup(click);
                         if let Some(url) = popup_url.as_deref() {
                             codegen::attach_navigation(click, url);
@@ -2670,6 +2671,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 &state.ref_map,
                 state.viewport,
                 scope,
+                element_capture.as_ref(),
                 &mut state.codegen,
             ) {
                 // Capture must never turn a successful browser action into a failure.
@@ -2690,22 +2692,29 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                         .map(|session_id| (browser.client.clone(), session_id.to_string()))
                 });
                 if let Some((client, session_id)) = capture_context {
-                    let probed_url = codegen::enrich_recent_steps(
-                        &mut state.codegen.steps[capture_start..],
-                        selector,
-                        &state.ref_map,
-                        &client,
-                        &session_id,
-                    )
-                    .await;
-                    if let Some(frame_id) = state.active_frame_id.as_deref() {
-                        if let Ok(frame) =
-                            codegen::probe::frame_index_path(&client, &session_id, frame_id).await
-                        {
-                            codegen::set_frame_scope(
-                                &mut state.codegen.steps[capture_start..],
-                                frame,
-                            );
+                    let probed_url = if let Some(capture) = element_capture.as_ref() {
+                        capture.probe.as_ref().and_then(|probe| probe.href.clone())
+                    } else {
+                        codegen::enrich_recent_steps(
+                            &mut state.codegen.steps[capture_start..],
+                            selector,
+                            &state.ref_map,
+                            &client,
+                            &session_id,
+                        )
+                        .await
+                    };
+                    if element_capture.is_none() {
+                        if let Some(frame_id) = state.active_frame_id.as_deref() {
+                            if let Ok(frame) =
+                                codegen::probe::frame_index_path(&client, &session_id, frame_id)
+                                    .await
+                            {
+                                codegen::set_frame_scope(
+                                    &mut state.codegen.steps[capture_start..],
+                                    frame,
+                                );
+                            }
                         }
                     }
                     if !codegen::has_frame_scope(&state.codegen.steps[capture_start..]) {
@@ -4934,8 +4943,8 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if new_tab {
-        use super::element::resolve_element_object_id;
-        let (object_id, effective_session_id) = resolve_element_object_id(
+        use super::element::resolve_element;
+        let resolved = resolve_element(
             &mgr.client,
             &session_id,
             &state.ref_map,
@@ -4943,8 +4952,15 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.iframe_sessions,
         )
         .await?;
+        let capture = if state.codegen.is_active() {
+            Some(
+                codegen::probe::capture_resolved_element(&mgr.client, &session_id, &resolved).await,
+            )
+        } else {
+            None
+        };
         let call_params = json!({
-            "objectId": object_id,
+            "objectId": resolved.object_id,
             "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
             "returnByValue": true
         });
@@ -4953,7 +4969,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             .send_command(
                 "Runtime.callFunctionOn",
                 Some(call_params),
-                Some(&effective_session_id),
+                Some(&resolved.session_id),
             )
             .await?;
         let href = call_result
@@ -4998,13 +5014,15 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             mgr.navigate(&href, WaitUntil::Load).await?;
         }
 
-        return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
+        let mut data = json!({ "clicked": selector, "newTab": true, "url": href });
+        codegen::attach_private_capture(&mut data, capture);
+        return Ok(data);
     }
 
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
 
-    let result = interaction::click(
+    let mut result = interaction::click_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -5012,14 +5030,20 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         button,
         click_count,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
+    let capture = result.capture.take();
 
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+        let mut data = json!({ "clicked": selector, "dialogOpened": true });
+        codegen::attach_private_capture(&mut data, capture);
+        return Ok(data);
     }
-    Ok(json!({ "clicked": selector }))
+    let mut data = json!({ "clicked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5030,19 +5054,27 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let result = interaction::dblclick(
+    let mut result = interaction::click_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        "left",
+        2,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
+    let capture = result.capture.take();
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+        let mut data = json!({ "clicked": selector, "dialogOpened": true });
+        codegen::attach_private_capture(&mut data, capture);
+        return Ok(data);
     }
-    Ok(json!({ "clicked": selector }))
+    let mut data = json!({ "clicked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5065,16 +5097,19 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::fill(
+    let capture = interaction::fill_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         value,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "filled": selector }))
+    let mut data = json!({ "filled": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5091,7 +5126,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
-    interaction::type_text(
+    let capture = interaction::type_text_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -5100,9 +5135,12 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         clear,
         delay,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "typed": text }))
+    let mut data = json!({ "typed": text });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5168,15 +5206,18 @@ async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    interaction::hover(
+    let capture = interaction::hover_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "hovered": selector }))
+    let mut data = json!({ "hovered": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5200,7 +5241,7 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         }
     }
 
-    interaction::scroll(
+    let capture = interaction::scroll_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -5208,9 +5249,12 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         dx,
         dy,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "scrolled": true }))
+    let mut data = json!({ "scrolled": true });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5234,16 +5278,19 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .unwrap_or_default(),
     };
 
-    interaction::select_option(
+    let capture = interaction::select_option_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &values,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "selected": values }))
+    let mut data = json!({ "selected": values });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5254,15 +5301,19 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    interaction::check(
+    let capture = interaction::set_checked_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        true,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "checked": selector }))
+    let mut data = json!({ "checked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5273,15 +5324,19 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    interaction::uncheck(
+    let capture = interaction::set_checked_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        false,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "unchecked": selector }))
+    let mut data = json!({ "unchecked": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7034,15 +7089,18 @@ async fn handle_tap(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::tap_touch(
+    let capture = interaction::tap_touch_with_capture(
         &mgr.client,
         &session_id,
         &state.ref_map,
         sel,
         &state.iframe_sessions,
+        state.codegen.is_active(),
     )
     .await?;
-    Ok(json!({ "tapped": sel }))
+    let mut data = json!({ "tapped": sel });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_boundingbox(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7133,16 +7191,23 @@ async fn handle_setvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'value' parameter")?;
 
-    super::element::set_element_value(
+    let resolved = super::element::resolve_element(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
-        value,
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "set": selector, "value": value }))
+    let capture = if state.codegen.is_active() {
+        Some(codegen::probe::capture_resolved_element(&mgr.client, &session_id, &resolved).await)
+    } else {
+        None
+    };
+    super::element::set_resolved_element_value(&mgr.client, &resolved, value).await?;
+    let mut data = json!({ "set": selector, "value": value });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_count(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7290,6 +7355,7 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
 async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -7310,9 +7376,32 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
-    mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
+    let resolved = super::element::resolve_element(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
+    let capture = if state.codegen.is_active() {
+        Some(codegen::probe::capture_resolved_element(&mgr.client, &session_id, &resolved).await)
+    } else {
+        None
+    };
+    mgr.client
+        .send_command(
+            "DOM.setFileInputFiles",
+            Some(json!({
+                "files": files.clone(),
+                "objectId": resolved.object_id,
+            })),
+            Some(&resolved.session_id),
+        )
         .await?;
-    Ok(json!({ "uploaded": files.len(), "selector": selector }))
+    let mut data = json!({ "uploaded": files.len(), "selector": selector });
+    codegen::attach_private_capture(&mut data, capture);
+    Ok(data)
 }
 
 async fn handle_addscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -12517,6 +12606,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_codegen_actions_do_not_require_browser() {
+        let directory = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
         let mut state = DaemonState::new();
         state.codegen = CodegenState::new();
         state.session_id = format!(

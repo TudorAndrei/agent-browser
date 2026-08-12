@@ -335,7 +335,7 @@ See [Debugging](/debugging) for console, error, dialog, trace, highlight, and De
 
 ## Codegen
 
-`codegen` captures successful actions as Chrome DevTools Recorder JSON or an `@playwright/test` spec. It is distinct from [Video Recording](/recording), which writes a WebM file.
+`codegen` captures supported successful actions as Chrome DevTools Recorder JSON or an `@playwright/test` spec. It omits unsafe targets and unsupported actions and reports warnings. It is distinct from [Video Recording](/recording), which writes a WebM file.
 
 ```bash
 agent-browser codegen start --title "login flow"
@@ -344,7 +344,7 @@ agent-browser codegen stop ./login.flow.json
 agent-browser codegen stop ./login.spec.ts --format playwright
 ```
 
-`codegen status` reports active, restored, degraded, recovery-error, and cleanup-pending states. Use `codegen discard` to remove an unfinished or damaged journal.
+`codegen status` reports active, restored, degraded, recovery-error, and cleanup-pending states. It also reports capture and omission warnings. Use `codegen discard` to remove an unfinished or damaged journal.
 
 ## Auth vault
 

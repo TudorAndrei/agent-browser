@@ -1,36 +1,37 @@
-use super::{ClickKind, Scope, Step, Target};
+use super::{ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target};
 use std::collections::HashMap;
 
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
-fn locator(target: &Target, page: &str, frame: &[usize]) -> String {
+fn locator(target: &Target, page: &str, frame: &[usize]) -> Option<String> {
     let mut page = page.to_string();
     for index in frame {
-        page.push_str(&format!(".frameLocator('iframe').nth({index})"));
+        page.push_str(&format!(".frameLocator('iframe, frame').nth({index})"));
     }
-    if let Some(test_id) = &target.test_id {
-        return format!("{page}.getByTestId({})", quote(test_id));
-    }
-    if let (Some(role), Some(name)) = (&target.role, &target.name) {
-        let mut result = format!(
-            "{page}.getByRole({}, {{ name: {} }})",
-            quote(role),
-            quote(name)
-        );
-        if let Some(nth) = target.nth {
-            result.push_str(&format!(".nth({nth})"));
+    target.selectors.first().map(|selector| match selector {
+        SelectorKind::TestId { value } => {
+            format!("{page}.getByTestId({})", quote(value))
         }
-        return result;
-    }
-    let selector = target
-        .selectors
-        .first()
-        .and_then(|alternative| alternative.first())
-        .cloned()
-        .unwrap_or_else(|| "body".to_string());
-    format!("{page}.locator({})", quote(&selector))
+        SelectorKind::Role { role, name, nth } => {
+            let mut result = format!(
+                "{page}.getByRole({}, {{ name: {} }})",
+                quote(role),
+                quote(name)
+            );
+            if let Some(nth) = nth {
+                result.push_str(&format!(".nth({nth})"));
+            }
+            result
+        }
+        SelectorKind::Css { value } => {
+            format!("{page}.locator({})", quote(value))
+        }
+        SelectorKind::XPath { value } => {
+            format!("{page}.locator({})", quote(&format!("xpath={value}")))
+        }
+    })
 }
 
 fn page_for(
@@ -67,6 +68,7 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
     ];
     let mut pages = HashMap::new();
     let mut next_page = 1;
+    let mut next_popup = 0usize;
     for step in steps {
         match step {
             Step::SetViewport { width, height, .. } => lines.push(format!(
@@ -89,22 +91,25 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
                     _ => "click()".to_string(),
                 };
                 let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                let Some(locator) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
                 if *opens_popup {
+                    next_popup += 1;
                     lines.push(format!(
-                        "  const popupPromise = {page}.waitForEvent('popup');"
+                        "  const popupPromise{next_popup} = {page}.waitForEvent('popup');"
                     ));
                 }
-                lines.push(format!(
-                    "  await {}.{};",
-                    locator(target, &page, &scope.frame),
-                    op
-                ));
+                lines.push(format!("  await {locator}.{op};"));
                 if *opens_popup {
-                    lines.push("  const popup = await popupPromise;".to_string());
-                    pages.insert("__pending_popup".to_string(), "popup".to_string());
+                    lines.push(format!(
+                        "  const popup{next_popup} = await popupPromise{next_popup};"
+                    ));
+                    pages.insert("__pending_popup".to_string(), format!("popup{next_popup}"));
                 }
                 if let Some(url) = asserted_url {
-                    let asserted_page = if *opens_popup { "popup" } else { &page };
+                    let popup_page = format!("popup{next_popup}");
+                    let asserted_page = if *opens_popup { &popup_page } else { &page };
                     lines.push(format!(
                         "  await expect({asserted_page}).toHaveURL({});",
                         quote(url)
@@ -113,10 +118,10 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
             }
             Step::Hover { target, scope } => {
                 let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
-                lines.push(format!(
-                    "  await {}.hover();",
-                    locator(target, &page, &scope.frame)
-                ))
+                let Some(locator) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
+                lines.push(format!("  await {locator}.hover();"))
             }
             Step::Change {
                 target,
@@ -127,9 +132,11 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
                 ..
             } => {
                 let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                let Some(locator) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
                 lines.push(format!(
-                    "  await {}.{}({});",
-                    locator(target, &page, &scope.frame),
+                    "  await {locator}.{}({});",
                     if *is_select { "selectOption" } else { "fill" },
                     quote(value)
                 ));
@@ -158,7 +165,9 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
                 ..
             } => {
                 let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
-                let loc = locator(target, &page, &scope.frame);
+                let Some(loc) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
                 if let Some(visible) = visible {
                     lines.push(if *visible {
                         format!("  await expect({loc}).toBeVisible();")
@@ -194,6 +203,213 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
                     pages.insert(url.clone(), page);
                 }
             }
+            Step::ScopedViewport {
+                width,
+                height,
+                scope,
+                ..
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                lines.push(format!(
+                    "  await {page}.setViewportSize({{ width: {width}, height: {height} }});"
+                ));
+            }
+            Step::ScopedNavigation {
+                kind, url, scope, ..
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                lines.push(match kind {
+                    NavigationKind::Goto => format!("  await {page}.goto({});", quote(url)),
+                    NavigationKind::Back => format!("  await {page}.goBack();"),
+                    NavigationKind::Forward => format!("  await {page}.goForward();"),
+                    NavigationKind::Reload => format!("  await {page}.reload();"),
+                });
+            }
+            Step::Pointer {
+                target,
+                kind,
+                pointer,
+                button,
+                count,
+                position,
+                opens_popup,
+                scope,
+                asserted_url,
+                ..
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                if *opens_popup {
+                    next_popup += 1;
+                    lines.push(format!(
+                        "  const popupPromise{next_popup} = {page}.waitForEvent('popup');"
+                    ));
+                }
+                let Some(loc) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
+                let point = *position;
+                let position_options = position
+                    .map(|(x, y)| format!(", position: {{ x: {x}, y: {y} }}"))
+                    .unwrap_or_default();
+                let operation = match (pointer, kind) {
+                    (PointerKind::Touch, _) => {
+                        let (x, y) = point.unwrap_or((0.0, 0.0));
+                        format!("tap({{ position: {{ x: {x}, y: {y} }} }})")
+                    }
+                    (_, ClickKind::Check) => "check()".to_string(),
+                    (_, ClickKind::Uncheck) => "uncheck()".to_string(),
+                    (_, _) if *count == 2 => {
+                        format!(
+                            "dblclick({{ button: {}{position_options} }})",
+                            quote(button)
+                        )
+                    }
+                    _ => format!("click({{ button: {}{position_options} }})", quote(button)),
+                };
+                lines.push(format!("  await {loc}.{operation};"));
+                if *opens_popup {
+                    lines.push(format!(
+                        "  const popup{next_popup} = await popupPromise{next_popup};"
+                    ));
+                    pages.insert("__pending_popup".to_string(), format!("popup{next_popup}"));
+                }
+                if let Some(url) = asserted_url {
+                    let asserted_page = if *opens_popup {
+                        format!("popup{next_popup}")
+                    } else {
+                        page
+                    };
+                    lines.push(format!(
+                        "  await expect({asserted_page}).toHaveURL({});",
+                        quote(url)
+                    ));
+                }
+            }
+            Step::Fill {
+                target,
+                value,
+                scope,
+                asserted_url,
+            }
+            | Step::SetValue {
+                target,
+                value,
+                scope,
+                asserted_url,
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                let Some(locator) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
+                lines.push(format!("  await {locator}.fill({});", quote(value)));
+                if let Some(url) = asserted_url {
+                    lines.push(format!("  await expect({page}).toHaveURL({});", quote(url)));
+                }
+            }
+            Step::Type {
+                target,
+                text,
+                clear,
+                delay_ms,
+                scope,
+                asserted_url,
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                let Some(loc) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
+                if *clear {
+                    lines.push(format!("  await {loc}.fill('');"));
+                }
+                let options = delay_ms
+                    .map(|delay| format!(", {{ delay: {delay} }}"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "  await {loc}.pressSequentially({}{});",
+                    quote(text),
+                    options
+                ));
+                if let Some(url) = asserted_url {
+                    lines.push(format!("  await expect({page}).toHaveURL({});", quote(url)));
+                }
+            }
+            Step::Select {
+                target,
+                values,
+                scope,
+                asserted_url,
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                let Some(locator) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
+                let values = serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string());
+                lines.push(format!("  await {locator}.selectOption({values});"));
+                if let Some(url) = asserted_url {
+                    lines.push(format!("  await expect({page}).toHaveURL({});", quote(url)));
+                }
+            }
+            Step::Press {
+                modifiers,
+                key,
+                scope,
+                asserted_url,
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                let chord = modifiers
+                    .iter()
+                    .chain(std::iter::once(key))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("+");
+                lines.push(format!("  await {page}.keyboard.press({});", quote(&chord)));
+                if let Some(url) = asserted_url {
+                    lines.push(format!("  await expect({page}).toHaveURL({});", quote(url)));
+                }
+            }
+            Step::Wheel {
+                target,
+                x,
+                y,
+                scope,
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                if let Some(target) = target {
+                    let Some(locator) = locator(target, &page, &scope.frame) else {
+                        continue;
+                    };
+                    lines.push(format!(
+                        "  await {locator}.evaluate((element, delta) => element.scrollBy(delta.x, delta.y), {{ x: {x}, y: {y} }});"
+                    ));
+                } else {
+                    lines.push(format!("  await {page}.mouse.wheel({x}, {y});"));
+                }
+            }
+            Step::Upload {
+                target,
+                paths,
+                scope,
+            } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                let Some(locator) = locator(target, &page, &scope.frame) else {
+                    continue;
+                };
+                let paths = serde_json::to_string(paths).unwrap_or_else(|_| "[]".to_string());
+                lines.push(format!("  await {locator}.setInputFiles({paths});"));
+            }
+            Step::NewPage { url, .. } => {
+                next_page += 1;
+                let page = format!("page{next_page}");
+                lines.push(format!("  const {page} = await context.newPage();"));
+                if let Some(url) = url {
+                    lines.push(format!("  await {page}.goto({});", quote(url)));
+                    pages.insert(url.clone(), page);
+                }
+            }
+            Step::ClosePage { scope } => {
+                let page = page_for(scope, &mut pages, &mut lines, &mut next_page);
+                lines.push(format!("  await {page}.close();"));
+            }
         }
     }
     lines.push("});".to_string());
@@ -204,15 +420,15 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::codegen::{ClickKind, Scope, Step, Target};
+    use crate::native::codegen::{ClickKind, Scope, SelectorKind, Step, Target};
     #[test]
     fn escapes_locator_strings() {
         let target = Target {
-            selectors: vec![vec!["#x".into()]],
-            role: Some("button".into()),
-            name: Some("O'Reilly".into()),
-            nth: None,
-            test_id: None,
+            selectors: vec![SelectorKind::Role {
+                role: "button".into(),
+                name: "O'Reilly".into(),
+                nth: None,
+            }],
             input_type: None,
         };
         let rendered = render_playwright(
@@ -233,11 +449,9 @@ mod tests {
     #[test]
     fn renders_popup_tab_and_frame_scopes() {
         let target = || Target {
-            selectors: vec![vec!["#pay".into()]],
-            role: None,
-            name: None,
-            nth: None,
-            test_id: None,
+            selectors: vec![SelectorKind::Css {
+                value: "#pay".into(),
+            }],
             input_type: None,
         };
         let rendered = render_playwright(
@@ -269,17 +483,26 @@ mod tests {
         );
         assert!(rendered.contains("waitForEvent('popup')"));
         assert!(rendered.contains("context.newPage()"));
-        assert!(rendered.contains("frameLocator('iframe').nth(0)"));
+        assert!(rendered.contains("frameLocator('iframe, frame').nth(0)"));
     }
 
     #[test]
     fn renders_all_locator_preferences_and_assertions() {
         let target = |test_id: Option<&str>, role: Option<&str>, name: Option<&str>| Target {
-            selectors: vec![vec![".fallback".into()]],
-            role: role.map(str::to_string),
-            name: name.map(str::to_string),
-            nth: Some(1),
-            test_id: test_id.map(str::to_string),
+            selectors: test_id
+                .map(|value| SelectorKind::TestId {
+                    value: value.to_string(),
+                })
+                .into_iter()
+                .chain(role.zip(name).map(|(role, name)| SelectorKind::Role {
+                    role: role.to_string(),
+                    name: name.to_string(),
+                    nth: Some(1),
+                }))
+                .chain(std::iter::once(SelectorKind::Css {
+                    value: ".fallback".into(),
+                }))
+                .collect(),
             input_type: None,
         };
         let rendered = render_playwright(
@@ -321,5 +544,71 @@ mod tests {
         assert!(rendered.contains("locator('.fallback')).toBeDisabled()"));
         assert!(rendered.contains("locator('.fallback')).toHaveCount(2)"));
         assert!(rendered.contains("expect(page).toHaveURL('https://example.com/done')"));
+    }
+
+    #[test]
+    fn renders_typed_input_actions_without_flattening_values() {
+        let target = Target {
+            selectors: vec![SelectorKind::Css {
+                value: "#target".into(),
+            }],
+            input_type: None,
+        };
+        let rendered = render_playwright(
+            "typed",
+            &[
+                Step::Select {
+                    target: target.clone(),
+                    values: vec!["a".into(), "b".into()],
+                    scope: Scope::default(),
+                    asserted_url: None,
+                },
+                Step::Type {
+                    target: target.clone(),
+                    text: "hello".into(),
+                    clear: true,
+                    delay_ms: Some(20),
+                    scope: Scope::default(),
+                    asserted_url: None,
+                },
+                Step::Press {
+                    modifiers: vec!["Control".into(), "Shift".into()],
+                    key: "a".into(),
+                    scope: Scope::default(),
+                    asserted_url: Some("https://example.com/done".into()),
+                },
+                Step::Upload {
+                    target,
+                    paths: vec!["a.txt".into(), "b.txt".into()],
+                    scope: Scope::default(),
+                },
+            ],
+        );
+
+        assert!(rendered.contains("selectOption([\"a\",\"b\"])"));
+        assert!(rendered.contains("fill('')"));
+        assert!(rendered.contains("pressSequentially('hello', { delay: 20 })"));
+        assert!(rendered.contains("keyboard.press('Control+Shift+a')"));
+        assert!(rendered.contains("setInputFiles([\"a.txt\",\"b.txt\"])"));
+        assert!(rendered.contains("expect(page).toHaveURL('https://example.com/done')"));
+    }
+
+    #[test]
+    fn omits_an_action_without_a_safe_selector() {
+        let rendered = render_playwright(
+            "unsafe",
+            &[Step::Fill {
+                target: Target {
+                    selectors: Vec::new(),
+                    input_type: None,
+                },
+                value: "value".into(),
+                scope: Scope::default(),
+                asserted_url: None,
+            }],
+        );
+
+        assert!(!rendered.contains(".fill("));
+        assert!(!rendered.contains("locator('body')"));
     }
 }

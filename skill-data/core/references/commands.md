@@ -129,7 +129,7 @@ agent-browser codegen status
 agent-browser codegen discard
 ```
 
-Capture successful automation actions as a Chrome DevTools Recorder flow. `codegen stop` prints the flow when no path is supplied; `--format playwright` emits an `@playwright/test` spec. `codegen status` reports capture and recovery state. `codegen discard` removes an unfinished or damaged journal. `codegen` is different from `record`, which writes a video. Typed values are retained verbatim, including credentials, so review artifacts before committing them. See [codegen.md](codegen.md).
+Capture supported successful automation actions as a Chrome DevTools Recorder flow. `codegen stop` prints the flow when no path is supplied; `--format playwright` emits an `@playwright/test` spec. Unsafe targets and unsupported actions are omitted and reported as warnings. `codegen status` reports capture and recovery state. `codegen discard` removes an unfinished or damaged journal. `codegen` is different from `record`, which writes a video. Typed values are retained verbatim, including credentials and upload paths, so review warnings and artifacts before you commit them. See [codegen.md](codegen.md).
 
 ## Wait
 

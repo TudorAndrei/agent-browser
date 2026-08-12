@@ -1,6 +1,6 @@
 # Codegen
 
-`agent-browser codegen` turns successful browser actions into a reusable Chrome DevTools Recorder flow. Start capture before performing actions, then stop it to print or save the result.
+`agent-browser codegen` turns supported successful browser actions into a reusable Chrome DevTools Recorder flow. Start capture before performing actions, then stop it to print or save the result.
 
 ```bash
 agent-browser codegen start --title "login flow"
@@ -11,6 +11,8 @@ agent-browser isvisible "#welcome"
 agent-browser codegen stop ./login.flow.json
 ```
 
-The default output is JSON compatible with the Chrome DevTools Recorder and `@puppeteer/replay`. Popup targets and iframe paths are retained in Recorder JSON and Playwright output. To write a Playwright test instead, use `agent-browser codegen stop ./login.spec.ts --format playwright`.
+The default output is JSON for Chrome DevTools Recorder and `@puppeteer/replay`. To write a Playwright test instead, use `agent-browser codegen stop ./login.spec.ts --format playwright`.
 
-`snapshot`, screenshots, page reads, and other observation commands do not become flow steps. The command captures typed values verbatim, including password values. The daemon restores an unfinished flow from its owner-only append-only journal after a restart. `agent-browser codegen status` reports active, restored, degraded, recovery-error, and cleanup-pending states. Use `agent-browser codegen discard` to delete an unfinished or damaged flow. A successful stop removes the journal. Treat the journal and generated artifact as sensitive material and do not commit credentials.
+Direct CSS selectors, `xpath=` selectors, snapshot refs with accessible names, and uniquely probed test IDs can become safe targets. Codegen omits an action when it cannot produce a safe target. Direct `text=` selectors, bare XPath, semantic locator marker actions, and most wait variants are not recorded. `snapshot`, screenshots, page reads, and other observation commands do not become flow steps. Other successful mutating or wait commands produce omission warnings.
+
+The command captures typed values verbatim, including password values, selected values, and upload paths. The daemon restores an unfinished flow from its owner-only append-only journal after a restart. `agent-browser codegen status` reports active, restored, degraded, recovery-error, and cleanup-pending states. It also reports capture and omission warnings. Use `agent-browser codegen discard` to delete an unfinished or damaged flow. A successful stop removes the journal. Treat the journal and generated artifact as sensitive material and do not commit credentials.

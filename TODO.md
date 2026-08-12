@@ -24,28 +24,28 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 
 ## Phase 2: Exact target capture and typed action model
 
-- [ ] Add `ResolvedElement` in `cli/src/native/element.rs` with object ID, optional backend node ID, effective session ID, and logical frame ID
-- [ ] Make click, double-click, tap, hover, fill, set value, type, select, check, uncheck, upload, and element scroll use one exact element resolution
-- [ ] Calculate coordinate-action points from the same resolved object
-- [ ] Probe the resolved object before the action only while codegen is active
-- [ ] Carry private capture data through interaction and handler results without changing public command JSON
-- [ ] Discard private capture data and omit journal actions when the browser action fails
-- [ ] Calculate frame scope before the action with the correct same-process iframe or OOPIF session
-- [ ] Replace flattened steps with typed action groups and typed selector kinds
-- [ ] Add typed fill, set value, type, select, upload, press chord, click-like input, scroll, viewport, navigation, assertion, explicit new-page, popup, and page-close models
-- [ ] Store effective select values, scroll coordinates, pointer position, button, pointer or touch kind, click count, type clear mode, type delay, and upload paths
-- [ ] Make every page-specific step carry page scope
-- [ ] Make unique test IDs, role plus accessible name, unique CSS, and XPath the only valid Playwright target forms
-- [ ] Remove empty selector emission and the Playwright `body` fallback
-- [ ] Omit an unsafe format step and record a structured warning instead of guessing
-- [ ] Add an exhaustive recorded, read-only observation, and omitted mutating or wait action classification
-- [ ] Keep direct `text=`, bare XPath, semantic temporary-marker locators, and unsupported wait variants out of scope and correct all false plan or documentation claims
-- [ ] Add durable degraded-state capture and persistence errors to status and stop
-- [ ] Test real probe behavior for unique test ID, duplicate test ID, unique ID, positional CSS, unnamed refs, failed probes, CSS password fields, same-process frames, OOPIFs, and nested frames
-- [ ] Replace the JS source-position probe test and the production-inaccurate `RefMap::add_selector` test with behavioral tests
-- [ ] Test exact type, select, upload, chord, pointer, scroll, viewport, assertion, omission, and failed-action behavior
-- [ ] Test that inactive codegen adds no capture calls and that the active target path stays within the agreed CDP command counts
-- [ ] Commit: `refactor(codegen): capture exact action intent and page scope`
+- [x] Add `ResolvedElement` in `cli/src/native/element.rs` with object ID, optional backend node ID, effective session ID, and logical frame ID
+- [x] Make click, double-click, tap, hover, fill, set value, type, select, check, uncheck, upload, and element scroll use one exact element resolution
+- [x] Calculate coordinate-action points from the same resolved object
+- [x] Probe the resolved object before the action only while codegen is active
+- [x] Carry private capture data through interaction and handler results without changing public command JSON
+- [x] Discard private capture data and omit journal actions when the browser action fails
+- [x] Calculate frame scope before the action with the correct same-process iframe or OOPIF session
+- [x] Replace flattened steps with typed action groups and typed selector kinds
+- [x] Add typed fill, set value, type, select, upload, press chord, click-like input, scroll, viewport, navigation, assertion, explicit new-page, popup, and page-close models
+- [x] Store effective select values, scroll coordinates, pointer position, button, pointer or touch kind, click count, type clear mode, type delay, and upload paths
+- [x] Make every page-specific step carry page scope
+- [x] Make unique test IDs, role plus accessible name, unique CSS, and XPath the only valid Playwright target forms
+- [x] Remove empty selector emission and the Playwright `body` fallback
+- [x] Omit an unsafe format step and record a structured warning instead of guessing
+- [x] Add an exhaustive recorded, read-only observation, and omitted mutating or wait action classification
+- [x] Keep direct `text=`, bare XPath, semantic temporary-marker locators, and unsupported wait variants out of scope and correct all false plan or documentation claims
+- [x] Add durable degraded-state capture and persistence errors to status and stop
+- [x] Test real probe behavior for unique test ID, duplicate test ID, unique ID, positional CSS, unnamed refs, failed probes, CSS password fields, same-process frames, OOPIFs, and nested frames
+- [x] Replace the JS source-position probe test and the production-inaccurate `RefMap::add_selector` test with behavioral tests
+- [x] Test exact type, select, upload, chord, pointer, scroll, viewport, assertion, omission, and failed-action behavior
+- [x] Test that inactive codegen adds no capture calls and that the active target path stays within the agreed CDP command counts
+- [x] Commit: `refactor(codegen): capture exact action intent and page scope`
 
 ## Phase 3: Logical pages, popups, navigation, and relaunch
 

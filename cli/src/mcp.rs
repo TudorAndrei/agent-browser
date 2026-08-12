@@ -1339,14 +1339,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CODEGEN_START,
             "Codegen start",
-            "Start capturing successful browser actions as a reusable flow.",
+            "Start capturing supported successful browser actions. Unsafe targets and unsupported actions become warnings.",
             json!({ "title": { "type": "string" } }),
             &[],
         ),
         tool(
             TOOL_CODEGEN_STOP,
             "Codegen stop",
-            "Stop capture and emit a Chrome Recorder JSON flow or Playwright spec.",
+            "Stop capture and emit a Chrome Recorder JSON flow or Playwright spec with capture warnings.",
             json!({ "path": { "type": "string" }, "format": { "type": "string", "enum": ["json", "playwright"] } }),
             &[],
         ),

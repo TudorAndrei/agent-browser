@@ -5,13 +5,54 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum SelectorKind {
+    TestId {
+        value: String,
+    },
+    Role {
+        role: String,
+        name: String,
+        nth: Option<usize>,
+    },
+    Css {
+        value: String,
+    },
+    XPath {
+        value: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Target {
-    pub selectors: Vec<Vec<String>>,
-    pub role: Option<String>,
-    pub name: Option<String>,
-    pub nth: Option<usize>,
-    pub test_id: Option<String>,
+    pub selectors: Vec<SelectorKind>,
     pub input_type: Option<String>,
+}
+
+impl Target {
+    fn has_safe_selector(&self) -> bool {
+        self.selectors.iter().any(|selector| match selector {
+            SelectorKind::TestId { value }
+            | SelectorKind::Css { value }
+            | SelectorKind::XPath { value } => !value.is_empty(),
+            SelectorKind::Role { role, name, .. } => !role.is_empty() && !name.is_empty(),
+        })
+    }
+
+    pub fn recorder_selectors(&self) -> Vec<Vec<String>> {
+        self.selectors
+            .iter()
+            .filter_map(|selector| match selector {
+                // The exact escaped CSS candidate from the probe is used for
+                // test IDs. Building CSS from the raw value here can change
+                // its meaning for quotes or other CSS syntax characters.
+                SelectorKind::TestId { .. } => None,
+                SelectorKind::Role { name, .. } => Some(vec![format!("aria/{name}")]),
+                SelectorKind::Css { value } => Some(vec![value.clone()]),
+                SelectorKind::XPath { value } => Some(vec![format!("xpath/{value}")]),
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,6 +77,20 @@ pub enum ClickKind {
     Check,
     Uncheck,
     Tap,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PointerKind {
+    Mouse,
+    Touch,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum NavigationKind {
+    Goto,
+    Back,
+    Forward,
+    Reload,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -94,14 +149,119 @@ pub enum Step {
     NewTab {
         url: Option<String>,
     },
+    ScopedViewport {
+        width: i64,
+        height: i64,
+        device_scale_factor: f64,
+        is_mobile: bool,
+        scope: Scope,
+    },
+    ScopedNavigation {
+        kind: NavigationKind,
+        url: String,
+        scope: Scope,
+    },
+    Pointer {
+        target: Target,
+        kind: ClickKind,
+        pointer: PointerKind,
+        button: String,
+        count: u8,
+        position: Option<(f64, f64)>,
+        opens_popup: bool,
+        scope: Scope,
+        asserted_url: Option<String>,
+    },
+    Fill {
+        target: Target,
+        value: String,
+        scope: Scope,
+        asserted_url: Option<String>,
+    },
+    SetValue {
+        target: Target,
+        value: String,
+        scope: Scope,
+        asserted_url: Option<String>,
+    },
+    Type {
+        target: Target,
+        text: String,
+        clear: bool,
+        delay_ms: Option<u64>,
+        scope: Scope,
+        asserted_url: Option<String>,
+    },
+    Select {
+        target: Target,
+        values: Vec<String>,
+        scope: Scope,
+        asserted_url: Option<String>,
+    },
+    Press {
+        modifiers: Vec<String>,
+        key: String,
+        scope: Scope,
+        asserted_url: Option<String>,
+    },
+    Wheel {
+        target: Option<Target>,
+        x: f64,
+        y: f64,
+        scope: Scope,
+    },
+    Upload {
+        target: Target,
+        paths: Vec<String>,
+        scope: Scope,
+    },
+    NewPage {
+        url: Option<String>,
+        scope: Scope,
+    },
+    ClosePage {
+        scope: Scope,
+    },
 }
 
 impl Step {
     pub fn has_password(&self) -> bool {
-        matches!(self, Self::Change { target, .. } if target.input_type.as_deref() == Some("password"))
+        matches!(self,
+            Self::Change { target, .. }
+            | Self::Fill { target, .. }
+            | Self::SetValue { target, .. }
+            | Self::Type { target, .. }
+            if target.input_type.as_deref() == Some("password")
+        )
     }
 
     pub fn to_recorder_json(&self) -> Value {
+        let recorder_safe =
+            |target: &Target| target.has_safe_selector() && !target.recorder_selectors().is_empty();
+        let unsafe_target = match self {
+            Self::Click { target, .. }
+            | Self::Pointer { target, .. }
+            | Self::Hover { target, .. }
+            | Self::Change { target, .. }
+            | Self::Fill { target, .. }
+            | Self::SetValue { target, .. }
+            | Self::Type { target, .. }
+            | Self::Select { target, .. }
+            | Self::Upload { target, .. }
+            | Self::WaitForElement { target, .. } => !recorder_safe(target),
+            Self::Scroll {
+                target: Some(target),
+                ..
+            }
+            | Self::Wheel {
+                target: Some(target),
+                ..
+            } => !recorder_safe(target),
+            _ => false,
+        };
+        if unsafe_target {
+            return Value::Null;
+        }
         match self {
             Self::SetViewport {
                 width,
@@ -124,17 +284,17 @@ impl Step {
                 // A popup navigates a different target, which the following scoped
                 // step resolves by URL, so keep this assertion for Playwright only.
                 if *opens_popup {
-                    json!({ "type": "click", "selectors": target.selectors, "offsetX": 0, "offsetY": 0, "button": "primary", "clickCount": count })
+                    json!({ "type": "click", "selectors": target.recorder_selectors(), "offsetX": 0, "offsetY": 0, "button": "primary", "clickCount": count })
                 } else {
                     with_navigation(
-                        json!({ "type": "click", "selectors": target.selectors, "offsetX": 0, "offsetY": 0, "button": "primary", "clickCount": count }),
+                        json!({ "type": "click", "selectors": target.recorder_selectors(), "offsetX": 0, "offsetY": 0, "button": "primary", "clickCount": count }),
                         asserted_url,
                     )
                 },
                 scope,
             ),
             Self::Hover { target, scope } => with_scope(
-                json!({ "type": "hover", "selectors": target.selectors, "offsetX": 0, "offsetY": 0 }),
+                json!({ "type": "hover", "selectors": target.recorder_selectors(), "offsetX": 0, "offsetY": 0 }),
                 scope,
             ),
             Self::Change {
@@ -145,7 +305,7 @@ impl Step {
                 ..
             } => with_scope(
                 with_navigation(
-                    json!({ "type": "change", "selectors": target.selectors, "value": value }),
+                    json!({ "type": "change", "selectors": target.recorder_selectors(), "value": value }),
                     asserted_url,
                 ),
                 scope,
@@ -162,7 +322,7 @@ impl Step {
             } => {
                 let mut value = json!({ "type": "scroll", "x": x, "y": y });
                 if let Some(target) = target {
-                    value["selectors"] = json!(target.selectors);
+                    value["selectors"] = json!(target.recorder_selectors());
                 }
                 with_scope(value, scope)
             }
@@ -175,7 +335,8 @@ impl Step {
                 scope,
                 ..
             } => {
-                let mut value = json!({ "type": "waitForElement", "selectors": target.selectors });
+                let mut value =
+                    json!({ "type": "waitForElement", "selectors": target.recorder_selectors() });
                 if let Some(visible) = visible {
                     value["visible"] = json!(visible);
                 }
@@ -194,7 +355,97 @@ impl Step {
             // Recorder has no tab creation primitive. The sidecar retains it so
             // Playwright can faithfully create a page, while JSON stays schema-clean.
             Self::NewTab { .. } => Value::Null,
+            Self::ScopedViewport {
+                width,
+                height,
+                device_scale_factor,
+                is_mobile,
+                scope,
+            } => with_scope(
+                json!({ "type": "setViewport", "width": width, "height": height, "deviceScaleFactor": device_scale_factor, "isMobile": is_mobile, "hasTouch": is_mobile, "isLandscape": false }),
+                scope,
+            ),
+            Self::ScopedNavigation { url, scope, .. } => {
+                with_scope(json!({ "type": "navigate", "url": url }), scope)
+            }
+            Self::Pointer {
+                target,
+                count,
+                button,
+                position,
+                asserted_url,
+                scope,
+                opens_popup,
+                ..
+            } => {
+                let (offset_x, offset_y) = position.unwrap_or((0.0, 0.0));
+                let value = json!({ "type": "click", "selectors": target.recorder_selectors(), "offsetX": offset_x, "offsetY": offset_y, "button": recorder_button(button), "clickCount": count });
+                with_scope(
+                    if *opens_popup {
+                        value
+                    } else {
+                        with_navigation(value, asserted_url)
+                    },
+                    scope,
+                )
+            }
+            Self::Fill {
+                target,
+                value,
+                scope,
+                asserted_url,
+            }
+            | Self::SetValue {
+                target,
+                value,
+                scope,
+                asserted_url,
+            } => with_scope(
+                with_navigation(
+                    json!({ "type": "change", "selectors": target.recorder_selectors(), "value": value }),
+                    asserted_url,
+                ),
+                scope,
+            ),
+            Self::Select {
+                target,
+                values,
+                scope,
+                asserted_url,
+            } if values.len() == 1 => with_scope(
+                with_navigation(
+                    json!({ "type": "change", "selectors": target.recorder_selectors(), "value": values[0] }),
+                    asserted_url,
+                ),
+                scope,
+            ),
+            Self::Wheel {
+                target,
+                x,
+                y,
+                scope,
+            } => {
+                let mut value = json!({ "type": "scroll", "x": x, "y": y });
+                if let Some(target) = target {
+                    value["selectors"] = json!(target.recorder_selectors());
+                }
+                with_scope(value, scope)
+            }
+            Self::ClosePage { scope } => with_scope(json!({ "type": "close" }), scope),
+            Self::Type { .. }
+            | Self::Select { .. }
+            | Self::Press { .. }
+            | Self::Upload { .. }
+            | Self::NewPage { .. } => Value::Null,
         }
+    }
+}
+
+fn recorder_button(button: &str) -> &str {
+    match button {
+        "right" => "secondary",
+        "middle" => "auxiliary",
+        _ => "primary",
     }
 }
 
@@ -217,50 +468,127 @@ fn with_scope(mut step: Value, scope: &Scope) -> Value {
 
 fn selector_target(selector: &str, refs: &RefMap) -> Target {
     if let Some(reference) = parse_ref(selector).and_then(|reference| refs.get(&reference)) {
-        let aria = if reference.name.is_empty() {
-            None
-        } else {
-            Some(format!("aria/{}", reference.name))
-        };
-        let css = reference.selector.clone();
-        let selectors = aria
-            .into_iter()
-            .chain(css)
-            .map(|value| vec![value])
-            .collect();
+        let mut selectors = Vec::new();
+        if !reference.role.is_empty() && !reference.name.is_empty() {
+            selectors.push(SelectorKind::Role {
+                role: reference.role.clone(),
+                name: reference.name.clone(),
+                nth: reference.nth,
+            });
+        }
+        if let Some(value) = reference.selector.clone() {
+            selectors.push(SelectorKind::Css { value });
+        }
         return Target {
             selectors,
-            role: (!reference.role.is_empty()).then(|| reference.role.clone()),
-            name: (!reference.name.is_empty()).then(|| reference.name.clone()),
-            nth: reference.nth,
-            test_id: None,
             input_type: None,
         };
     }
-    let value = if let Some(text) = selector.strip_prefix("text=") {
-        format!("text/{text}")
+    let selector = if selector.starts_with("text=") || selector.starts_with("//") {
+        None
     } else if let Some(xpath) = selector.strip_prefix("xpath=") {
-        format!("xpath/{xpath}")
-    } else if selector.starts_with("//") {
-        format!("xpath/{selector}")
+        Some(SelectorKind::XPath {
+            value: xpath.to_string(),
+        })
     } else {
-        selector.to_string()
+        Some(SelectorKind::Css {
+            value: selector.to_string(),
+        })
     };
     Target {
-        selectors: vec![vec![value]],
-        role: None,
-        name: None,
-        nth: None,
-        test_id: None,
+        selectors: selector.into_iter().collect(),
         input_type: None,
     }
 }
 
-fn target(cmd: &Value, refs: &RefMap) -> Option<Target> {
-    cmd.get("selector")
-        .and_then(Value::as_str)
-        .map(|selector| selector_target(selector, refs))
+fn target(cmd: &Value, refs: &RefMap, capture: Option<&probe::ElementCapture>) -> Option<Target> {
+    let selector = cmd.get("selector").and_then(Value::as_str)?;
+    if capture.is_some_and(|capture| capture.frame_probe_failed) {
+        return None;
+    }
+    let mut target = selector_target(selector, refs);
+    if let Some(probe) = capture.and_then(|capture| capture.probe.as_ref()) {
+        enrich_target(&mut target, probe);
+    }
+    (!target.selectors.is_empty()).then_some(target)
 }
+
+fn select_values(cmd: &Value) -> Vec<String> {
+    match cmd.get("values") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(value)) => vec![value.clone()],
+        _ => cmd
+            .get("value")
+            .and_then(Value::as_str)
+            .map(|value| vec![value.to_string()])
+            .unwrap_or_default(),
+    }
+}
+
+fn normalize_key_chord(value: &str) -> (Vec<String>, String) {
+    let parts = value.split('+').collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return (Vec::new(), value.to_string());
+    }
+    let mut modifiers = Vec::new();
+    let mut key = Vec::new();
+    for part in parts {
+        let normalized = match part.to_ascii_lowercase().as_str() {
+            "alt" => Some("Alt"),
+            "control" | "ctrl" => Some("Control"),
+            "meta" | "cmd" | "command" => Some("Meta"),
+            "shift" => Some("Shift"),
+            _ => None,
+        };
+        if let Some(modifier) = normalized {
+            if !modifiers.iter().any(|existing| existing == modifier) {
+                modifiers.push(modifier.to_string());
+            }
+        } else {
+            key.push(part);
+        }
+    }
+    if modifiers.is_empty() || key.is_empty() {
+        (Vec::new(), value.to_string())
+    } else {
+        (modifiers, key.join("+"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionSupport {
+    Recorded,
+    Observation,
+    Omitted,
+}
+
+fn action_support(action: &str) -> ActionSupport {
+    // This support matrix is the capture contract. New successful commands
+    // must be classified here so they cannot disappear from a flow silently.
+    match action {
+        "navigate" | "back" | "forward" | "reload" | "click" | "tap" | "dblclick" | "check"
+        | "uncheck" | "hover" | "fill" | "setvalue" | "type" | "select" | "upload" | "press"
+        | "scroll" | "viewport" | "isvisible" | "isenabled" | "ischecked" | "count" | "wait"
+        | "tab_new" => ActionSupport::Recorded,
+        "snapshot" | "screenshot" | "gettext" | "getattribute" | "url" | "cdp_url" | "title"
+        | "content" | "read" | "console" | "errors" | "inspect" | "boundingbox" | "innertext"
+        | "innerhtml" | "inputvalue" | "styles" | "cookies_get" | "storage_get"
+        | "session_info" | "state_save" | "credentials_get" | "credentials_list"
+        | "credentials_delete" | "download" | "diff_snapshot" | "diff_url" | "responsebody"
+        | "requests" | "request_detail" | "react_tree" | "react_inspect" | "react_suspense"
+        | "vitals" | "tab_list" | "stream_status" | "device_list" | "codegen_start"
+        | "codegen_stop" | "codegen_status" | "codegen_discard" | "close" => {
+            ActionSupport::Observation
+        }
+        _ => ActionSupport::Omitted,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn record_action(
     action: &str,
     cmd: &Value,
@@ -268,16 +596,23 @@ pub fn record_action(
     refs: &RefMap,
     viewport: Option<(i32, i32, f64, bool)>,
     scope: Scope,
+    capture: Option<&probe::ElementCapture>,
     state: &mut super::CodegenState,
 ) -> Result<(), String> {
     let mut steps = Vec::new();
-    let sc = scope;
+    let mut omission = None;
+    let mut sc = scope;
+    if let Some(frame) = capture.and_then(|capture| capture.frame.as_ref()) {
+        sc.frame = frame.clone();
+    }
     match action {
         "navigate" => {
             if let Some(url) = cmd.get("url").and_then(Value::as_str) {
                 if state.last_url.as_deref() != Some(url) {
-                    steps.push(Step::Navigate {
+                    steps.push(Step::ScopedNavigation {
+                        kind: NavigationKind::Goto,
                         url: url.to_string(),
+                        scope: sc.clone(),
                     });
                     state.last_url = Some(url.to_string());
                 }
@@ -285,86 +620,165 @@ pub fn record_action(
         }
         "back" | "forward" | "reload" => {
             if let Some(url) = data.get("url").and_then(Value::as_str) {
-                steps.push(Step::Navigate {
+                steps.push(Step::ScopedNavigation {
+                    kind: match action {
+                        "back" => NavigationKind::Back,
+                        "forward" => NavigationKind::Forward,
+                        _ => NavigationKind::Reload,
+                    },
                     url: url.to_string(),
+                    scope: sc.clone(),
                 });
                 state.last_url = Some(url.to_string());
             }
         }
         "click" | "tap" | "dblclick" | "check" | "uncheck" => {
-            if let Some(target) = target(cmd, refs) {
+            if let Some(target) = target(cmd, refs, capture) {
                 let kind = match action {
                     "check" => ClickKind::Check,
                     "uncheck" => ClickKind::Uncheck,
                     "tap" => ClickKind::Tap,
                     _ => ClickKind::Click,
                 };
-                steps.push(Step::Click {
+                steps.push(Step::Pointer {
                     target,
-                    count: if action == "dblclick" { 2 } else { 1 },
                     kind,
+                    pointer: if action == "tap" {
+                        PointerKind::Touch
+                    } else {
+                        PointerKind::Mouse
+                    },
+                    button: cmd
+                        .get("button")
+                        .and_then(Value::as_str)
+                        .unwrap_or("left")
+                        .to_string(),
+                    count: if action == "dblclick" {
+                        2
+                    } else {
+                        cmd.get("clickCount").and_then(Value::as_u64).unwrap_or(1) as u8
+                    },
+                    position: capture.and_then(|capture| capture.position),
                     opens_popup: cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false),
-                    scope: sc,
+                    scope: sc.clone(),
                     asserted_url: None,
                 });
+            } else {
+                omission = Some("The action target did not have a safe selector.");
             }
         }
         "hover" => {
-            if let Some(target) = target(cmd, refs) {
-                steps.push(Step::Hover { target, scope: sc });
+            if let Some(target) = target(cmd, refs, capture) {
+                steps.push(Step::Hover {
+                    target,
+                    scope: sc.clone(),
+                });
+            } else {
+                omission = Some("The action target did not have a safe selector.");
             }
         }
         "fill" | "setvalue" | "type" | "select" => {
-            if let Some(target) = target(cmd, refs) {
-                let value = cmd
-                    .get(if action == "type" {
-                        "text"
-                    } else if action == "select" {
-                        "values"
-                    } else {
-                        "value"
+            if let Some(target) = target(cmd, refs, capture) {
+                match action {
+                    "fill" => steps.push(Step::Fill {
+                        target,
+                        value: cmd
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        scope: sc.clone(),
+                        asserted_url: None,
+                    }),
+                    "setvalue" => steps.push(Step::SetValue {
+                        target,
+                        value: cmd
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        scope: sc.clone(),
+                        asserted_url: None,
+                    }),
+                    "type" => steps.push(Step::Type {
+                        target,
+                        text: cmd
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        clear: cmd.get("clear").and_then(Value::as_bool).unwrap_or(false),
+                        delay_ms: cmd.get("delay").and_then(Value::as_u64),
+                        scope: sc.clone(),
+                        asserted_url: None,
+                    }),
+                    _ => steps.push(Step::Select {
+                        target,
+                        values: select_values(cmd),
+                        scope: sc.clone(),
+                        asserted_url: None,
+                    }),
+                }
+            } else {
+                omission = Some("The action target did not have a safe selector.");
+            }
+        }
+        "upload" => {
+            if let Some(target) = target(cmd, refs, capture) {
+                let paths = cmd
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .map(|paths| {
+                        paths
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
                     })
-                    .map(|v| {
-                        if let Some(s) = v.as_str() {
-                            s.to_string()
-                        } else {
-                            v.to_string()
-                        }
+                    .or_else(|| {
+                        cmd.get("file")
+                            .and_then(Value::as_str)
+                            .map(|path| vec![path.to_string()])
                     })
                     .unwrap_or_default();
-                steps.push(Step::Change {
+                steps.push(Step::Upload {
                     target,
-                    value,
-                    is_select: action == "select",
-                    scope: sc,
-                    asserted_url: None,
+                    paths,
+                    scope: sc.clone(),
                 });
+            } else {
+                omission = Some("The action target did not have a safe selector.");
             }
         }
         "press" => {
             if let Some(key) = cmd.get("key").and_then(Value::as_str) {
-                steps.push(Step::KeyDown {
-                    key: key.to_string(),
+                let (modifiers, key) = normalize_key_chord(key);
+                steps.push(Step::Press {
+                    modifiers,
+                    key,
                     scope: sc.clone(),
-                });
-                steps.push(Step::KeyUp {
-                    key: key.to_string(),
-                    scope: sc,
+                    asserted_url: None,
                 });
             }
         }
-        "scroll" => steps.push(Step::Scroll {
-            target: target(cmd, refs),
-            x: cmd.get("x").and_then(Value::as_i64).unwrap_or(0),
-            y: cmd.get("y").and_then(Value::as_i64).unwrap_or(0),
-            scope: sc,
+        "scroll" => steps.push(Step::Wheel {
+            target: target(cmd, refs, capture),
+            x: capture
+                .and_then(|capture| capture.scroll_delta)
+                .map(|(x, _)| x)
+                .unwrap_or_else(|| cmd.get("x").and_then(Value::as_f64).unwrap_or(0.0)),
+            y: capture
+                .and_then(|capture| capture.scroll_delta)
+                .map(|(_, y)| y)
+                .unwrap_or_else(|| cmd.get("y").and_then(Value::as_f64).unwrap_or(0.0)),
+            scope: sc.clone(),
         }),
         "viewport" => {
             if let (Some(width), Some(height)) = (
                 cmd.get("width").and_then(Value::as_i64),
                 cmd.get("height").and_then(Value::as_i64),
             ) {
-                steps.push(Step::SetViewport {
+                steps.push(Step::ScopedViewport {
                     width,
                     height,
                     device_scale_factor: cmd
@@ -372,11 +786,12 @@ pub fn record_action(
                         .and_then(Value::as_f64)
                         .unwrap_or(1.0),
                     is_mobile: cmd.get("mobile").and_then(Value::as_bool).unwrap_or(false),
+                    scope: sc.clone(),
                 });
             }
         }
         "isvisible" | "isenabled" | "ischecked" | "count" | "wait" => {
-            if let Some(target) = target(cmd, refs) {
+            if let Some(target) = target(cmd, refs, capture) {
                 let mut properties = Map::new();
                 let mut visible = None;
                 let mut count = None;
@@ -401,56 +816,106 @@ pub fn record_action(
                 }
                 steps.push(Step::WaitForElement {
                     target,
-                    scope: sc,
+                    scope: sc.clone(),
                     visible,
                     properties,
                     count,
                     operator: count.map(|_| "==".to_string()),
                 });
+            } else {
+                omission = Some("The action target did not have a safe selector.");
             }
         }
-        "close" => steps.push(Step::Close),
-        "tab_new" => steps.push(Step::NewTab {
+        "close" => return Ok(()),
+        "tab_new" => steps.push(Step::NewPage {
             url: cmd.get("url").and_then(Value::as_str).map(str::to_string),
+            scope: sc.clone(),
         }),
-        _ => {}
+        "snapshot" | "screenshot" | "gettext" | "getattribute" | "url" | "title" | "content"
+        | "console" | "errors" | "inspect" | "boundingbox" | "innertext" | "innerhtml"
+        | "inputvalue" | "styles" | "codegen_status" => return Ok(()),
+        _ if action_support(action) == ActionSupport::Observation => return Ok(()),
+        _ => omission = Some("The successful action is not supported by codegen."),
     }
     if !steps.is_empty() && !state.viewport_emitted {
         let (width, height, scale, mobile) = viewport.unwrap_or((1280, 720, 1.0, false));
         steps.insert(
             0,
-            Step::SetViewport {
+            Step::ScopedViewport {
                 width: width.into(),
                 height: height.into(),
                 device_scale_factor: scale,
                 is_mobile: mobile,
+                scope: sc,
             },
         );
         state.viewport_emitted = true;
     }
-    state.capture_action(action, steps);
+    if !steps.is_empty() || omission.is_some() {
+        let action_id = state.capture_action(action, steps);
+        if let Some(message) = omission {
+            state.capture_warning("omitted-action", message, Some(action_id));
+        }
+        if capture.is_some_and(|capture| capture.probe_failed) {
+            state.capture_warning(
+                "selector-probe-failed",
+                "Codegen could not inspect the action target before the action.",
+                Some(action_id),
+            );
+        }
+        if matches!(action, "fill" | "setvalue" | "type" | "select" | "upload") {
+            state.capture_warning(
+                "typed-values-stored",
+                "The recording stores action values verbatim.",
+                Some(action_id),
+            );
+        }
+        if capture
+            .and_then(|capture| capture.probe.as_ref())
+            .and_then(|probe| probe.input_type.as_deref())
+            == Some("password")
+        {
+            state.capture_warning(
+                "password-value-stored",
+                "The recording stores a confirmed password value verbatim.",
+                Some(action_id),
+            );
+        }
+    }
     Ok(())
 }
 
 fn enrich_target(target: &mut Target, probe: &Probe) {
     if let Some(selector) = &probe.selector {
-        if !target
-            .selectors
-            .iter()
-            .any(|candidate| candidate == &vec![selector.clone()])
-        {
-            target.selectors.push(vec![selector.clone()]);
+        let candidate = SelectorKind::Css {
+            value: selector.clone(),
+        };
+        if !target.selectors.contains(&candidate) {
+            target.selectors.push(candidate);
         }
     }
-    target.test_id = probe.test_id.clone();
+    if let Some(test_id) = &probe.test_id {
+        target.selectors.insert(
+            0,
+            SelectorKind::TestId {
+                value: test_id.clone(),
+            },
+        );
+    }
     target.input_type = probe.input_type.clone();
 }
 
 fn enrich_step(step: &mut Step, probe: &Probe) {
     match step {
         Step::Click { target, .. }
+        | Step::Pointer { target, .. }
         | Step::Hover { target, .. }
         | Step::Change { target, .. }
+        | Step::Fill { target, .. }
+        | Step::SetValue { target, .. }
+        | Step::Type { target, .. }
+        | Step::Select { target, .. }
+        | Step::Upload { target, .. }
         | Step::WaitForElement { target, .. } => enrich_target(target, probe),
         Step::Scroll {
             target: Some(target),
@@ -484,16 +949,22 @@ pub async fn enrich_recent_steps(
 
 pub fn attach_navigation(step: &mut Step, url: &str) {
     match step {
-        Step::Click { asserted_url, .. } | Step::Change { asserted_url, .. } => {
-            *asserted_url = Some(url.to_string())
-        }
+        Step::Click { asserted_url, .. }
+        | Step::Pointer { asserted_url, .. }
+        | Step::Change { asserted_url, .. }
+        | Step::Fill { asserted_url, .. }
+        | Step::SetValue { asserted_url, .. }
+        | Step::Type { asserted_url, .. }
+        | Step::Select { asserted_url, .. }
+        | Step::Press { asserted_url, .. } => *asserted_url = Some(url.to_string()),
         _ => {}
     }
 }
 
 pub fn mark_popup(step: &mut Step) {
-    if let Step::Click { opens_popup, .. } = step {
-        *opens_popup = true;
+    match step {
+        Step::Click { opens_popup, .. } | Step::Pointer { opens_popup, .. } => *opens_popup = true,
+        _ => {}
     }
 }
 
@@ -501,8 +972,20 @@ pub fn set_frame_scope(steps: &mut [Step], frame: Vec<usize>) {
     for step in steps {
         match step {
             Step::Click { scope, .. }
+            | Step::Pointer { scope, .. }
             | Step::Hover { scope, .. }
             | Step::Change { scope, .. }
+            | Step::Fill { scope, .. }
+            | Step::SetValue { scope, .. }
+            | Step::Type { scope, .. }
+            | Step::Select { scope, .. }
+            | Step::Press { scope, .. }
+            | Step::Wheel { scope, .. }
+            | Step::Upload { scope, .. }
+            | Step::ScopedNavigation { scope, .. }
+            | Step::ScopedViewport { scope, .. }
+            | Step::NewPage { scope, .. }
+            | Step::ClosePage { scope, .. }
             | Step::KeyDown { scope, .. }
             | Step::KeyUp { scope, .. }
             | Step::Scroll { scope, .. }
@@ -515,8 +998,20 @@ pub fn set_frame_scope(steps: &mut [Step], frame: Vec<usize>) {
 pub fn has_frame_scope(steps: &[Step]) -> bool {
     steps.iter().any(|step| match step {
         Step::Click { scope, .. }
+        | Step::Pointer { scope, .. }
         | Step::Hover { scope, .. }
         | Step::Change { scope, .. }
+        | Step::Fill { scope, .. }
+        | Step::SetValue { scope, .. }
+        | Step::Type { scope, .. }
+        | Step::Select { scope, .. }
+        | Step::Press { scope, .. }
+        | Step::Wheel { scope, .. }
+        | Step::Upload { scope, .. }
+        | Step::ScopedNavigation { scope, .. }
+        | Step::ScopedViewport { scope, .. }
+        | Step::NewPage { scope, .. }
+        | Step::ClosePage { scope, .. }
         | Step::KeyDown { scope, .. }
         | Step::KeyUp { scope, .. }
         | Step::Scroll { scope, .. }
@@ -529,6 +1024,15 @@ pub fn has_frame_scope(steps: &[Step]) -> bool {
 mod tests {
     use super::*;
     use crate::native::codegen::{CodegenState, CodegenStatus};
+
+    fn active_state() -> (tempfile::TempDir, CodegenState) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = CodegenState::new();
+        state.status = CodegenStatus::Active;
+        state.sidecar_path = Some(directory.path().join("flow.jsonl"));
+        std::fs::write(state.sidecar_path.as_ref().unwrap(), "").unwrap();
+        (directory, state)
+    }
 
     #[test]
     fn captures_core_steps_and_skips_observations() {
@@ -545,6 +1049,7 @@ mod tests {
             &refs,
             Some((1280, 720, 1.0, false)),
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -555,6 +1060,7 @@ mod tests {
             &refs,
             None,
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -565,6 +1071,7 @@ mod tests {
             &refs,
             None,
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -575,6 +1082,7 @@ mod tests {
             &refs,
             None,
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -607,6 +1115,7 @@ mod tests {
             &refs,
             None,
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -617,6 +1126,7 @@ mod tests {
             &refs,
             None,
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -627,6 +1137,7 @@ mod tests {
             &refs,
             None,
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -645,6 +1156,7 @@ mod tests {
             &RefMap::new(),
             Some((1280, 720, 1.0, false)),
             Scope::default(),
+            None,
             &mut state,
         )
         .unwrap();
@@ -653,11 +1165,123 @@ mod tests {
     }
 
     #[test]
-    fn captures_supported_actions_and_selector_forms() {
+    fn production_refs_use_a_probed_selector_when_accessible_name_is_empty() {
+        let mut refs = RefMap::new();
+        refs.add_with_frame("e1".into(), Some(42), "button", "", None, None);
+        let capture = probe::ElementCapture {
+            probe: Some(Probe {
+                selector: Some("#actual".to_string()),
+                ..Probe::default()
+            }),
+            ..probe::ElementCapture::default()
+        };
+        let mut captured = CodegenState::new();
+        captured.status = CodegenStatus::Active;
+        record_action(
+            "click",
+            &json!({ "selector": "@e1" }),
+            &json!({}),
+            &refs,
+            None,
+            Scope::default(),
+            Some(&capture),
+            &mut captured,
+        )
+        .unwrap();
+        assert!(matches!(
+            captured.steps.last(),
+            Some(Step::Pointer { target, .. }) if target.selectors == vec![SelectorKind::Css { value: "#actual".to_string() }]
+        ));
+
+        let mut omitted = CodegenState::new();
+        omitted.status = CodegenStatus::Active;
+        record_action(
+            "click",
+            &json!({ "selector": "@e1" }),
+            &json!({}),
+            &refs,
+            None,
+            Scope::default(),
+            Some(&probe::ElementCapture {
+                probe_failed: true,
+                ..probe::ElementCapture::default()
+            }),
+            &mut omitted,
+        )
+        .unwrap();
+        assert!(omitted.steps.is_empty());
+        assert!(omitted
+            .capture_errors
+            .iter()
+            .any(|warning| warning.starts_with("omitted-action:")));
+
+        let mut named_refs = RefMap::new();
+        named_refs.add_with_frame("e2".into(), Some(43), "button", "Save", None, None);
+        let mut named = CodegenState::new();
+        named.status = CodegenStatus::Active;
+        record_action(
+            "click",
+            &json!({ "selector": "@e2" }),
+            &json!({}),
+            &named_refs,
+            None,
+            Scope::default(),
+            Some(&probe::ElementCapture {
+                probe_failed: true,
+                ..probe::ElementCapture::default()
+            }),
+            &mut named,
+        )
+        .unwrap();
+        assert!(matches!(
+            named.steps.last(),
+            Some(Step::Pointer { target, .. }) if matches!(target.selectors.first(), Some(SelectorKind::Role { role, name, .. }) if role == "button" && name == "Save")
+        ));
+    }
+
+    #[test]
+    fn css_password_capture_adds_security_warnings() {
+        let capture = probe::ElementCapture {
+            probe: Some(Probe {
+                selector: Some("#password".to_string()),
+                input_type: Some("password".to_string()),
+                ..Probe::default()
+            }),
+            ..probe::ElementCapture::default()
+        };
         let mut state = CodegenState::new();
         state.status = CodegenStatus::Active;
-        let mut refs = RefMap::new();
-        refs.add_selector("e1".into(), "#usable".into(), "button", "", None);
+        record_action(
+            "fill",
+            &json!({ "selector": "#password", "value": "not-printed" }),
+            &json!({}),
+            &RefMap::new(),
+            None,
+            Scope::default(),
+            Some(&capture),
+            &mut state,
+        )
+        .unwrap();
+
+        assert!(state
+            .capture_errors
+            .iter()
+            .any(|warning| warning.starts_with("typed-values-stored:")));
+        assert!(state
+            .capture_errors
+            .iter()
+            .any(|warning| warning.starts_with("password-value-stored:")));
+        assert!(!state
+            .capture_errors
+            .iter()
+            .any(|warning| warning.contains("not-printed")));
+    }
+
+    #[test]
+    fn captures_supported_actions_with_production_selector_forms() {
+        let mut state = CodegenState::new();
+        state.status = CodegenStatus::Active;
+        let refs = RefMap::new();
         let scope = Scope::default();
 
         for (action, command, data) in [
@@ -676,14 +1300,14 @@ mod tests {
                 json!({}),
                 json!({ "url": "https://example.com/reload" }),
             ),
-            ("click", json!({ "selector": "@e1" }), json!({})),
-            ("tap", json!({ "selector": "text=Tap" }), json!({})),
+            ("click", json!({ "selector": "#button" }), json!({})),
+            ("tap", json!({ "selector": "#tap" }), json!({})),
             (
                 "dblclick",
                 json!({ "selector": "xpath=//button" }),
                 json!({}),
             ),
-            ("hover", json!({ "selector": "//a" }), json!({})),
+            ("hover", json!({ "selector": "a" }), json!({})),
             (
                 "fill",
                 json!({ "selector": "#field", "value": "value" }),
@@ -747,6 +1371,7 @@ mod tests {
                 &refs,
                 None,
                 scope.clone(),
+                None,
                 &mut state,
             )
             .unwrap();
@@ -763,28 +1388,26 @@ mod tests {
             .filter_map(|step| step.get("type").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert!(types.contains(&"navigate"));
-        assert_eq!(recorder_steps[4]["selectors"][0][0], "#usable");
-        assert_eq!(recorder_steps[5]["selectors"][0][0], "text/Tap");
+        assert_eq!(recorder_steps[4]["selectors"][0][0], "#button");
         assert_eq!(recorder_steps[6]["selectors"][0][0], "xpath///button");
-        assert_eq!(recorder_steps[7]["selectors"][0][0], "xpath///a");
         assert!(types.contains(&"hover"));
         assert!(types.contains(&"change"));
-        assert!(types.contains(&"keyDown"));
-        assert!(types.contains(&"keyUp"));
         assert!(types.contains(&"scroll"));
         assert!(types.contains(&"waitForElement"));
-        assert!(types.contains(&"close"));
         assert_eq!(
             state
                 .steps
                 .iter()
-                .filter(|step| matches!(step, Step::SetViewport { .. }))
+                .filter(|step| matches!(
+                    step,
+                    Step::SetViewport { .. } | Step::ScopedViewport { .. }
+                ))
                 .count(),
             2,
             "one initial viewport plus the explicit viewport action"
         );
         assert!(matches!(
-            state.steps.iter().find(|step| matches!(step, Step::Click { target, .. } if target.selectors == vec![vec!["#usable".to_string()]])),
+            state.steps.iter().find(|step| matches!(step, Step::Pointer { target, .. } if target.selectors == vec![SelectorKind::Css { value: "#button".to_string() }])),
             Some(_)
         ));
     }
@@ -808,6 +1431,7 @@ mod tests {
                 &RefMap::new(),
                 None,
                 Scope::default(),
+                None,
                 &mut state,
             )
             .unwrap();
@@ -833,11 +1457,9 @@ mod tests {
     #[test]
     fn recorder_json_preserves_non_main_target_and_frame() {
         let target = Target {
-            selectors: vec![vec!["#pay".to_string()]],
-            role: None,
-            name: None,
-            nth: None,
-            test_id: None,
+            selectors: vec![SelectorKind::Css {
+                value: "#pay".to_string(),
+            }],
             input_type: None,
         };
         let step = Step::Click {
@@ -859,11 +1481,9 @@ mod tests {
     #[test]
     fn popup_navigation_assertion_stays_out_of_recorder_json() {
         let target = Target {
-            selectors: vec![vec!["#open".to_string()]],
-            role: None,
-            name: None,
-            nth: None,
-            test_id: None,
+            selectors: vec![SelectorKind::Css {
+                value: "#open".to_string(),
+            }],
             input_type: None,
         };
         let step = Step::Click {
@@ -894,6 +1514,7 @@ mod tests {
                 &RefMap::new(),
                 Some((1024, 768, 1.0, false)),
                 Scope::default(),
+                None,
                 &mut state,
             )
             .unwrap();
@@ -902,9 +1523,162 @@ mod tests {
             state
                 .steps
                 .iter()
-                .filter(|step| matches!(step, Step::SetViewport { .. }))
+                .filter(|step| matches!(
+                    step,
+                    Step::SetViewport { .. } | Step::ScopedViewport { .. }
+                ))
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn typed_actions_keep_exact_action_intent_and_page_scope() {
+        let capture = probe::ElementCapture {
+            probe: Some(Probe {
+                selector: Some("#target".to_string()),
+                ..Probe::default()
+            }),
+            position: Some((12.5, 24.0)),
+            scroll_delta: Some((0.0, 450.0)),
+            ..probe::ElementCapture::default()
+        };
+        let mut state = CodegenState::new();
+        state.status = CodegenStatus::Active;
+        for (action, command) in [
+            (
+                "select",
+                json!({ "selector": "#target", "values": ["a", "b"] }),
+            ),
+            (
+                "type",
+                json!({ "selector": "#target", "text": "text", "clear": true, "delay": 25 }),
+            ),
+            ("press", json!({ "key": "Control+Shift+a" })),
+            (
+                "click",
+                json!({ "selector": "#target", "button": "right", "clickCount": 2 }),
+            ),
+            (
+                "scroll",
+                json!({ "selector": "#target", "direction": "down", "amount": 450 }),
+            ),
+            (
+                "upload",
+                json!({ "selector": "#target", "files": ["a.txt", "b.txt"] }),
+            ),
+            (
+                "viewport",
+                json!({ "width": 900, "height": 700, "deviceScaleFactor": 2.0, "mobile": true }),
+            ),
+        ] {
+            record_action(
+                action,
+                &command,
+                &json!({}),
+                &RefMap::new(),
+                None,
+                Scope {
+                    target: "page-2".to_string(),
+                    frame: vec![1],
+                },
+                Some(&capture),
+                &mut state,
+            )
+            .unwrap();
+        }
+
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Select { values, .. } if values == &vec!["a".to_string(), "b".to_string()]
+        )));
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Type {
+                clear: true,
+                delay_ms: Some(25),
+                ..
+            }
+        )));
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Press { modifiers, key, .. } if modifiers == &vec!["Control".to_string(), "Shift".to_string()] && key == "a"
+        )));
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Pointer { button, count: 2, position: Some((12.5, 24.0)), .. } if button == "right"
+        )));
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Wheel { y, .. } if *y == 450.0
+        )));
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Upload { paths, .. } if paths == &vec!["a.txt".to_string(), "b.txt".to_string()]
+        )));
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::ScopedViewport { width: 900, height: 700, device_scale_factor, is_mobile: true, scope }
+                if *device_scale_factor == 2.0 && scope.target == "page-2" && scope.frame == vec![1]
+        )));
+        for step in &mut state.steps {
+            attach_navigation(step, "https://example.com/done");
+        }
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Press { asserted_url: Some(url), scope, .. }
+                if url == "https://example.com/done" && scope.target == "page-2"
+        )));
+    }
+
+    #[test]
+    fn support_matrix_warns_for_unsupported_successful_mutation() {
+        let (_directory, mut state) = active_state();
+        record_action(
+            "drag",
+            &json!({ "source": "#a", "target": "#b" }),
+            &json!({ "dragged": true }),
+            &RefMap::new(),
+            None,
+            Scope::default(),
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        assert_eq!(state.steps.len(), 0);
+        assert_eq!(state.capture_errors.len(), 1);
+        assert!(state.capture_errors[0].starts_with("omitted-action:"));
+    }
+
+    #[test]
+    fn support_matrix_keeps_read_only_commands_out_of_capture() {
+        for action in [
+            "snapshot",
+            "url",
+            "cookies_get",
+            "storage_get",
+            "requests",
+            "vitals",
+            "tab_list",
+        ] {
+            let (_directory, mut state) = active_state();
+            record_action(
+                action,
+                &json!({}),
+                &json!({}),
+                &RefMap::new(),
+                None,
+                Scope::default(),
+                None,
+                &mut state,
+            )
+            .unwrap();
+            assert!(state.steps.is_empty(), "{action} produced a step");
+            assert!(
+                state.capture_errors.is_empty(),
+                "{action} produced a warning"
+            );
+        }
     }
 }

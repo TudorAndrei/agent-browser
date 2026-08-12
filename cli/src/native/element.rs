@@ -15,6 +15,28 @@ pub struct RefEntry {
     pub frame_id: Option<String>,
 }
 
+/// The exact DOM object and execution context used by an element action.
+/// Codegen can probe this object before the action changes the page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedElement {
+    pub object_id: String,
+    pub backend_node_id: Option<i64>,
+    pub session_id: String,
+    pub frame_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedElementPoint {
+    pub element: ResolvedElement,
+    pub x: f64,
+    pub y: f64,
+    pub offset_x: f64,
+    pub offset_y: f64,
+}
+
+// `ResolvedElement` is the canonical identity seam for targeted interactions.
+// Callers that capture codegen facts must probe it before they mutate the page.
+
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
     next_ref: usize,
@@ -395,6 +417,59 @@ pub async fn resolve_element_center(
     Ok((x, y, session_id.to_string()))
 }
 
+/// Resolve one DOM object and calculate the input point from that same object.
+pub async fn resolve_element_point(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<ResolvedElementPoint, String> {
+    let element = resolve_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    let _ = client
+        .send_command(
+            "DOM.scrollIntoViewIfNeeded",
+            Some(serde_json::json!({ "objectId": element.object_id.clone() })),
+            Some(&element.session_id),
+        )
+        .await;
+    let model: DomGetBoxModelResult = client
+        .send_command_typed(
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: None,
+                node_id: None,
+                object_id: Some(element.object_id.clone()),
+            },
+            Some(&element.session_id),
+        )
+        .await?;
+    let (x, y) = box_model_center(&model.model);
+    check_object_interception(
+        client,
+        &element.session_id,
+        &element.object_id,
+        selector_or_ref,
+        x,
+        y,
+    )
+    .await?;
+    Ok(ResolvedElementPoint {
+        element,
+        x,
+        y,
+        offset_x: model.model.width as f64 / 2.0,
+        offset_y: model.model.height as f64 / 2.0,
+    })
+}
+
 /// Hit-test a ref-resolved node at its computed click point and error if an
 /// unrelated element (overlay, banner, sticky header) would receive the input
 /// instead. Best effort: resolution failures skip the check rather than block
@@ -424,6 +499,17 @@ async fn check_node_interception(
     let Some(object_id) = resolved.object.object_id else {
         return Ok(());
     };
+    check_object_interception(client, session_id, &object_id, target, x, y).await
+}
+
+async fn check_object_interception(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    target: &str,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
     // Box-model coordinates are in the top-level viewport space, so the
     // hit-test starts from the top document. For an OOPIF node the
     // frameElement walk stops at the process boundary, where the frame's own
@@ -476,13 +562,13 @@ async fn scroll_node_into_view(client: &CdpClient, session_id: &str, backend_nod
         .await;
 }
 
-pub async fn resolve_element_object_id(
+pub async fn resolve_element(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(String, String), String> {
+) -> Result<ResolvedElement, String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
             .get(&ref_id)
@@ -507,7 +593,12 @@ pub async fn resolve_element_object_id(
 
             if let Ok(r) = result {
                 if let Some(object_id) = r.object.object_id {
-                    return Ok((object_id, effective_session_id.to_string()));
+                    return Ok(ResolvedElement {
+                        object_id,
+                        backend_node_id: Some(backend_node_id),
+                        session_id: effective_session_id.to_string(),
+                        frame_id: entry.frame_id.clone(),
+                    });
                 }
             }
             // backend_node_id is stale; re-query the accessibility tree below
@@ -539,7 +630,12 @@ pub async fn resolve_element_object_id(
             .object
             .object_id
             .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
-        return Ok((object_id, effective_session_id.to_string()));
+        return Ok(ResolvedElement {
+            object_id,
+            backend_node_id: Some(fresh_id),
+            session_id: effective_session_id.to_string(),
+            frame_id: entry.frame_id.clone(),
+        });
     }
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
@@ -561,12 +657,22 @@ pub async fn resolve_element_object_id(
                 .result
                 .object_id
                 .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-            return Ok((object_id, frame_session.clone()));
+            return Ok(ResolvedElement {
+                object_id,
+                backend_node_id: None,
+                session_id: frame_session.clone(),
+                frame_id: Some(frame_id),
+            });
         }
         let object_id =
             resolve_object_in_same_process_frame(client, session_id, &frame_id, selector_or_ref)
                 .await?;
-        return Ok((object_id, session_id.to_string()));
+        return Ok(ResolvedElement {
+            object_id,
+            backend_node_id: None,
+            session_id: session_id.to_string(),
+            frame_id: Some(frame_id),
+        });
     }
 
     let js = build_find_element_js(selector_or_ref);
@@ -586,7 +692,31 @@ pub async fn resolve_element_object_id(
         .result
         .object_id
         .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-    Ok((object_id, session_id.to_string()))
+    Ok(ResolvedElement {
+        object_id,
+        backend_node_id: None,
+        session_id: session_id.to_string(),
+        frame_id: None,
+    })
+}
+
+/// Compatibility adapter for callers that only need an object handle.
+pub async fn resolve_element_object_id(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, String), String> {
+    let resolved = resolve_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    Ok((resolved.object_id, resolved.session_id))
 }
 
 /// Determine which CDP session and parameters to use for an AX tree query.
@@ -1185,7 +1315,7 @@ pub async fn set_element_value(
     value: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
+    let resolved = resolve_element(
         client,
         session_id,
         ref_map,
@@ -1193,7 +1323,14 @@ pub async fn set_element_value(
         iframe_sessions,
     )
     .await?;
+    set_resolved_element_value(client, &resolved, value).await
+}
 
+pub async fn set_resolved_element_value(
+    client: &CdpClient,
+    resolved: &ResolvedElement,
+    value: &str,
+) -> Result<(), String> {
     let js = format!(
         "function() {{ this.value = {}; this.dispatchEvent(new Event('input', {{bubbles: true}})); this.dispatchEvent(new Event('change', {{bubbles: true}})); }}",
         serde_json::to_string(value).unwrap_or_default()
@@ -1204,12 +1341,12 @@ pub async fn set_element_value(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
                 function_declaration: js,
-                object_id: Some(object_id),
+                object_id: Some(resolved.object_id.clone()),
                 arguments: None,
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(&effective_session_id),
+            Some(&resolved.session_id),
         )
         .await?;
 

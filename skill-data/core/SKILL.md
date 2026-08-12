@@ -336,7 +336,7 @@ See [references/video-recording.md](references/video-recording.md) for codec opt
 
 ### Generate a reusable test flow
 
-Use `codegen` to capture successful actions as Chrome DevTools Recorder JSON or a Playwright spec. It is separate from `record`, which saves a video.
+Use `codegen` to capture supported successful actions as Chrome DevTools Recorder JSON or a Playwright spec. It is separate from `record`, which saves a video. Codegen omits unsafe targets and unsupported actions and reports warnings.
 
 ```bash
 agent-browser codegen start --title "checkout"
@@ -345,7 +345,7 @@ agent-browser codegen stop ./checkout.json
 agent-browser codegen stop ./checkout.spec.ts --format playwright
 ```
 
-Use `agent-browser codegen status` to inspect a restored flow and `agent-browser codegen discard` to remove an unfinished or damaged flow. See [references/codegen.md](references/codegen.md). Recorded values, including passwords, are stored verbatim, and unfinished flows survive daemon restarts through an owner-only append-only journal.
+Use `agent-browser codegen status` to inspect warnings or a restored flow. Use `agent-browser codegen discard` to remove an unfinished or damaged flow. See [references/codegen.md](references/codegen.md). Recorded values, including passwords and upload paths, are stored verbatim, and unfinished flows survive daemon restarts through an owner-only append-only journal.
 
 ### Iframes
 

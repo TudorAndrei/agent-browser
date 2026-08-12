@@ -1,4 +1,7 @@
-//! Capture agent-browser actions as Chrome DevTools Recorder flows.
+//! Capture supported successful agent-browser actions as typed browser-test intent.
+//!
+//! A capture failure does not fail the browser command. Unsafe targets and
+//! unsupported mutating actions are omitted and become durable warnings.
 
 mod playwright;
 pub mod probe;
@@ -6,16 +9,37 @@ mod sidecar;
 mod steps;
 
 pub use playwright::render_playwright;
+pub use probe::ElementCapture;
 #[allow(unused_imports)]
 pub use steps::{
     attach_navigation, enrich_recent_steps, has_frame_scope, mark_popup, record_action,
-    set_frame_scope, ClickKind, Scope, Step, Target,
+    set_frame_scope, ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+const PRIVATE_CAPTURE_KEY: &str = "__agentBrowserCodegenCapture";
+
+/// Add capture data to an internal handler value. The dispatcher removes it
+/// before it creates the public command response.
+pub fn attach_private_capture(data: &mut Value, capture: Option<ElementCapture>) {
+    let Some(capture) = capture else {
+        return;
+    };
+    if let Some(object) = data.as_object_mut() {
+        if let Ok(value) = serde_json::to_value(capture) {
+            object.insert(PRIVATE_CAPTURE_KEY.to_string(), value);
+        }
+    }
+}
+
+pub fn take_private_capture(data: &mut Value) -> Option<ElementCapture> {
+    let value = data.as_object_mut()?.remove(PRIVATE_CAPTURE_KEY)?;
+    serde_json::from_value(value).ok()
+}
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -62,6 +86,7 @@ pub struct CodegenState {
     action_spans: Vec<ActionSpan>,
     next_action_id: u64,
     next_step_id: u64,
+    next_warning_id: u64,
     next_sequence: u64,
     persisted_last_url: Option<String>,
 }
@@ -83,6 +108,7 @@ impl CodegenState {
             action_spans: Vec::new(),
             next_action_id: 1,
             next_step_id: 1,
+            next_warning_id: 1,
             next_sequence: 1,
             persisted_last_url: None,
         }
@@ -128,6 +154,7 @@ impl CodegenState {
         state.last_url = recovered.last_url.clone();
         state.persisted_last_url = recovered.last_url;
         state.next_sequence = recovered.next_sequence;
+        state.next_warning_id = recovered.next_warning_id;
         state.sidecar_path = Some(path.clone());
         state.capture_errors = recovered.degraded_messages;
         state.capture_errors.extend(recovered.warnings);
@@ -177,7 +204,7 @@ impl CodegenState {
         state.viewport_emitted = state
             .steps
             .iter()
-            .any(|step| matches!(step, Step::SetViewport { .. }));
+            .any(|step| matches!(step, Step::SetViewport { .. } | Step::ScopedViewport { .. }));
         state
     }
 
@@ -199,10 +226,7 @@ impl CodegenState {
         let _ = self.append_record(sidecar::JournalRecord::Degraded { message: error });
     }
 
-    pub fn capture_action(&mut self, action: &str, steps: Vec<Step>) {
-        if steps.is_empty() {
-            return;
-        }
+    pub fn capture_action(&mut self, action: &str, steps: Vec<Step>) -> u64 {
         let action_id = self.next_action_id;
         self.next_action_id += 1;
         let start = self.steps.len();
@@ -236,6 +260,23 @@ impl CodegenState {
             persisted_steps: if journaled { steps } else { Vec::new() },
             step_ids,
         });
+        action_id
+    }
+
+    pub fn capture_warning(&mut self, code: &str, message: &str, action_id: Option<u64>) {
+        let warning_id = self.next_warning_id;
+        self.next_warning_id += 1;
+        let display = format!("{code}: {message}");
+        self.capture_errors.push(display);
+        if let Err(error) = self.append_record(sidecar::JournalRecord::Warning {
+            warning_id,
+            code: code.to_string(),
+            message: message.to_string(),
+            action_id,
+            step_id: None,
+        }) {
+            self.mark_degraded(error);
+        }
     }
 
     fn reset(&mut self) {
@@ -530,6 +571,29 @@ pub fn codegen_discard(state: &mut CodegenState, session_id: &str) -> Result<Val
 mod tests {
     use super::*;
 
+    #[test]
+    fn private_element_capture_round_trips_without_public_fields() {
+        let mut data = json!({ "filled": "#password" });
+        attach_private_capture(
+            &mut data,
+            Some(ElementCapture {
+                probe: Some(probe::Probe {
+                    input_type: Some("password".to_string()),
+                    ..probe::Probe::default()
+                }),
+                ..ElementCapture::default()
+            }),
+        );
+
+        let capture = take_private_capture(&mut data).unwrap();
+
+        assert_eq!(
+            capture.probe.unwrap().input_type.as_deref(),
+            Some("password")
+        );
+        assert_eq!(data, json!({ "filled": "#password" }));
+    }
+
     fn restored_state(directory: &tempfile::TempDir) -> CodegenState {
         let path = directory.path().join("flow.codegen.jsonl");
         std::fs::write(&path, "").unwrap();
@@ -591,11 +655,9 @@ mod tests {
     fn stop_emits_navigation_and_password_warning() {
         let directory = tempfile::tempdir().unwrap();
         let target = Target {
-            selectors: vec![vec!["#password".to_string()]],
-            role: None,
-            name: None,
-            nth: None,
-            test_id: None,
+            selectors: vec![SelectorKind::Css {
+                value: "#password".to_string(),
+            }],
             input_type: Some("password".to_string()),
         };
         let mut state = restored_state(&directory);

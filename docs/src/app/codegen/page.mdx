@@ -1,6 +1,6 @@
 # Codegen
 
-Use `codegen` to turn successful agent-browser actions into reusable test artifacts. The default format is Chrome DevTools Recorder JSON, compatible with the Recorder panel and `@puppeteer/replay`. Use Playwright output when you want a runnable `@playwright/test` spec.
+Use `codegen` to turn supported successful agent-browser actions into reusable test artifacts. The default format is Chrome DevTools Recorder JSON for the Recorder panel and `@puppeteer/replay`. Use Playwright output when you want a runnable `@playwright/test` spec.
 
 ## Workflow
 
@@ -26,7 +26,7 @@ agent-browser codegen stop ./login.spec.ts --format playwright
     <tr><th>Command</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>codegen start [--title &lt;title&gt;]</code></td><td>Start capturing successful actions</td></tr>
+    <tr><td><code>codegen start [--title &lt;title&gt;]</code></td><td>Start capturing supported successful actions</td></tr>
     <tr><td><code>codegen stop [path] [--format json|playwright]</code></td><td>Print or write the generated flow</td></tr>
     <tr><td><code>codegen status</code></td><td>Show active capture state and step count</td></tr>
     <tr><td><code>codegen discard</code></td><td>Remove an unfinished, damaged, or cleanup-pending recording</td></tr>
@@ -35,8 +35,8 @@ agent-browser codegen stop ./login.spec.ts --format playwright
 
 `codegen` is not [Video Recording](/recording). `record` saves a WebM while `codegen` writes a replayable browser-test artifact.
 
-Popup targets and iframe paths are preserved when exporting either Recorder JSON or Playwright.
+Direct CSS selectors, <code>xpath=</code> selectors, snapshot refs with accessible names, and uniquely probed test IDs can become safe targets. Codegen omits an action when it cannot produce a safe target. Direct <code>text=</code> selectors, bare XPath, semantic locator marker actions, and most wait variants are not recorded. Other successful mutating or wait commands produce omission warnings. Read all warnings before you use the artifact.
 
 ## Security
 
-Typed values are included verbatim for replay fidelity, including password values. The in-progress append-only journal is stored with owner-only permissions in the daemon socket directory, so an unfinished flow survives a daemon restart. Use `codegen status` to inspect its recovery state and `codegen discard` to remove it. A successful stop removes the journal. Inspect generated artifacts and do not commit credentials.
+Typed values are included verbatim for replay fidelity. This includes password values, selected values, and upload paths. The in-progress append-only journal is stored with owner-only permissions in the daemon socket directory, so an unfinished flow survives a daemon restart. Use `codegen status` to inspect warnings and recovery state. Use `codegen discard` to remove the journal. A successful stop removes the journal. Inspect generated artifacts and do not commit credentials.

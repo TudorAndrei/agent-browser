@@ -168,7 +168,7 @@ agent-browser get styles <sel>        # Get computed styles
 
 ### Generate a reusable test flow
 
-`codegen` records successful agent-browser actions as a Chrome DevTools Recorder JSON flow. Use `--format playwright` to emit an `@playwright/test` spec instead. This is distinct from `record`, which creates a video.
+`codegen` records supported successful agent-browser actions as a Chrome DevTools Recorder JSON flow. Use `--format playwright` to emit an `@playwright/test` spec instead. This is distinct from `record`, which creates a video.
 
 ```bash
 agent-browser codegen start --title "login flow"
@@ -178,7 +178,7 @@ agent-browser click "#submit"
 agent-browser codegen stop ./login.flow.json
 ```
 
-Popup targets and iframe paths are retained in both Recorder JSON and Playwright output. Recorded values, including password values, are written verbatim. An in-progress flow survives a daemon restart through an owner-only append-only journal in the socket directory. Use `codegen status` to inspect a restored flow and `codegen discard` to remove an unfinished, damaged, or cleanup-pending flow. A successful stop removes the journal. Review generated files before committing them.
+Codegen records direct CSS selectors, `xpath=` selectors, snapshot refs with an accessible name, and uniquely probed test IDs. It omits an action when it cannot produce a safe target. It also reports successful mutating or wait actions that it does not support. Direct `text=` selectors, bare XPath, semantic locator marker actions, and most wait variants are not recorded. Recorded values, including password values and upload paths, are written verbatim. An in-progress flow survives a daemon restart through an owner-only append-only journal in the socket directory. Use `codegen status` to inspect warnings and recovery state. Use `codegen discard` to remove an unfinished, damaged, or cleanup-pending flow. A successful stop removes the journal. Review all warnings and generated files before you use or commit them.
 
 ### Read Agent-Friendly Text
 
