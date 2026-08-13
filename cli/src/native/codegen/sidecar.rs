@@ -24,6 +24,31 @@ pub struct CapturedAction {
     pub steps: Vec<CapturedStep>,
 }
 
+/// Durable identity for one top-level page in a codegen flow. Runtime tab IDs
+/// are intentionally not stored because a browser relaunch can reuse them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedPage {
+    pub page_id: String,
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub opener_target_id: Option<String>,
+    #[serde(default)]
+    pub popup_attributed: bool,
+    pub url: String,
+    pub closed: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedPageState {
+    pub pages: Vec<PersistedPage>,
+    pub next_page_id: u64,
+    pub start_page_id: Option<String>,
+    pub last_active_page_id: Option<String>,
+    pub initial_state_captured: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "data", rename_all = "kebab-case")]
 pub enum JournalRecord {
@@ -36,6 +61,7 @@ pub enum JournalRecord {
     State {
         last_url: Option<String>,
     },
+    Pages(PersistedPageState),
     Degraded {
         message: String,
     },
@@ -78,6 +104,7 @@ pub enum TerminalRecord {
 pub struct RecoveredJournal {
     pub title: String,
     pub last_url: Option<String>,
+    pub page_state: PersistedPageState,
     pub actions: Vec<CapturedAction>,
     pub next_sequence: u64,
     pub next_warning_id: u64,
@@ -198,6 +225,10 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
     let mut expected_sequence = 1u64;
     let mut title = None;
     let mut last_url = None;
+    let mut page_state = PersistedPageState {
+        next_page_id: 1,
+        ..PersistedPageState::default()
+    };
     let mut actions = BTreeMap::<u64, CapturedAction>::new();
     let mut degraded_messages = Vec::new();
     let mut warnings = BTreeMap::<u64, String>::new();
@@ -291,6 +322,7 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
             JournalRecord::State {
                 last_url: updated_url,
             } => last_url = updated_url,
+            JournalRecord::Pages(updated) => page_state = updated,
             JournalRecord::Degraded { message } => degraded_messages.push(message),
             JournalRecord::Warning {
                 warning_id,
@@ -330,6 +362,7 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
     Ok(RecoveredJournal {
         title,
         last_url,
+        page_state,
         actions: actions.into_values().collect(),
         next_sequence: expected_sequence,
         next_warning_id,
@@ -531,6 +564,43 @@ mod tests {
             recovered.actions[0].steps[0].step,
             Step::KeyDown { .. }
         ));
+    }
+
+    #[test]
+    fn recovers_the_latest_logical_page_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        append(&path, 1, &start()).unwrap();
+        append(
+            &path,
+            2,
+            &JournalRecord::Pages(PersistedPageState {
+                pages: vec![PersistedPage {
+                    page_id: "p1".to_string(),
+                    target_id: Some("target-a".to_string()),
+                    opener_target_id: None,
+                    popup_attributed: true,
+                    url: "https://example.com".to_string(),
+                    closed: false,
+                }],
+                next_page_id: 2,
+                start_page_id: Some("p1".to_string()),
+                last_active_page_id: Some("p1".to_string()),
+                initial_state_captured: true,
+            }),
+        )
+        .unwrap();
+
+        let recovered = recover(&path).unwrap();
+
+        assert_eq!(recovered.page_state.pages[0].page_id, "p1");
+        assert_eq!(recovered.page_state.next_page_id, 2);
+        assert!(recovered.page_state.initial_state_captured);
     }
 
     #[test]

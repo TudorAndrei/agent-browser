@@ -12,14 +12,17 @@ pub use playwright::render_playwright;
 pub use probe::ElementCapture;
 #[allow(unused_imports)]
 pub use steps::{
-    attach_navigation, enrich_recent_steps, has_frame_scope, mark_popup, record_action,
-    set_frame_scope, ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target,
+    action_can_navigate, attach_navigation, bind_popup, can_assert_navigation, can_open_popup,
+    enrich_recent_steps, has_frame_scope, mark_popup, record_action, set_frame_scope, step_scope,
+    ActionContext, ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::native::browser::PageInfo;
 
 const PRIVATE_CAPTURE_KEY: &str = "__agentBrowserCodegenCapture";
 
@@ -70,6 +73,20 @@ struct ActionSpan {
     step_ids: Vec<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageIdentity {
+    pub page_id: String,
+    pub target_id: String,
+    pub session_id: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingStep {
+    action_id: u64,
+    step_index: usize,
+}
+
 /// State intentionally lives with the daemon so a flow spans browser relaunches.
 pub struct CodegenState {
     pub status: CodegenStatus,
@@ -77,9 +94,7 @@ pub struct CodegenState {
     pub steps: Vec<Step>,
     pub viewport_emitted: bool,
     pub last_url: Option<String>,
-    pub start_tab: Option<String>,
     pub sidecar_path: Option<PathBuf>,
-    pub known_tabs: HashSet<String>,
     pub capture_errors: Vec<String>,
     pub cleanup_paths: Vec<PathBuf>,
     pub artifact_path: Option<String>,
@@ -89,6 +104,16 @@ pub struct CodegenState {
     next_warning_id: u64,
     next_sequence: u64,
     persisted_last_url: Option<String>,
+    pages: Vec<sidecar::PersistedPage>,
+    next_page_id: u64,
+    start_page_id: Option<String>,
+    last_active_page_id: Option<String>,
+    initial_state_captured: bool,
+    persisted_page_state: sidecar::PersistedPageState,
+    sessions: HashMap<String, String>,
+    pending_navigation: HashMap<String, PendingStep>,
+    pending_popup: HashMap<String, PendingStep>,
+    main_frames: HashMap<String, String>,
 }
 
 impl CodegenState {
@@ -99,9 +124,7 @@ impl CodegenState {
             steps: Vec::new(),
             viewport_emitted: false,
             last_url: None,
-            start_tab: None,
             sidecar_path: None,
-            known_tabs: HashSet::new(),
             capture_errors: Vec::new(),
             cleanup_paths: Vec::new(),
             artifact_path: None,
@@ -111,11 +134,383 @@ impl CodegenState {
             next_warning_id: 1,
             next_sequence: 1,
             persisted_last_url: None,
+            pages: Vec::new(),
+            next_page_id: 1,
+            start_page_id: None,
+            last_active_page_id: None,
+            initial_state_captured: false,
+            persisted_page_state: sidecar::PersistedPageState {
+                next_page_id: 1,
+                ..sidecar::PersistedPageState::default()
+            },
+            sessions: HashMap::new(),
+            pending_navigation: HashMap::new(),
+            pending_popup: HashMap::new(),
+            main_frames: HashMap::new(),
         }
     }
 
     pub fn is_active(&self) -> bool {
         self.status.is_capturing()
+    }
+
+    fn page_state(&self) -> sidecar::PersistedPageState {
+        sidecar::PersistedPageState {
+            pages: self.pages.clone(),
+            next_page_id: self.next_page_id,
+            start_page_id: self.start_page_id.clone(),
+            last_active_page_id: self.last_active_page_id.clone(),
+            initial_state_captured: self.initial_state_captured,
+        }
+    }
+
+    fn allocate_page(&mut self, page: &PageInfo) -> String {
+        let page_id = format!("p{}", self.next_page_id);
+        self.next_page_id += 1;
+        self.pages.push(sidecar::PersistedPage {
+            page_id: page_id.clone(),
+            target_id: Some(page.target_id.clone()),
+            opener_target_id: page.opener_id.clone(),
+            popup_attributed: !self.initial_state_captured,
+            url: page.url.clone(),
+            closed: false,
+        });
+        page_id
+    }
+
+    /// Update logical page bindings from the current browser state. Page IDs
+    /// are monotonic for the full recording and never use URLs or runtime tab IDs.
+    pub fn sync_runtime_pages(
+        &mut self,
+        runtime_pages: &[PageInfo],
+        active_target_id: Option<&str>,
+        local_relaunch: bool,
+    ) -> Option<PageIdentity> {
+        self.sync_runtime_pages_inner(runtime_pages, active_target_id, local_relaunch, true, true)
+    }
+
+    pub fn sync_action_result_pages(
+        &mut self,
+        runtime_pages: &[PageInfo],
+        active_target_id: Option<&str>,
+    ) -> Option<PageIdentity> {
+        self.sync_runtime_pages_inner(runtime_pages, active_target_id, false, false, false)
+    }
+
+    fn sync_runtime_pages_inner(
+        &mut self,
+        runtime_pages: &[PageInfo],
+        active_target_id: Option<&str>,
+        local_relaunch: bool,
+        observe_url_changes: bool,
+        update_page_urls: bool,
+    ) -> Option<PageIdentity> {
+        if !self.is_active() {
+            return None;
+        }
+        self.sessions.clear();
+        if local_relaunch {
+            for page in &mut self.pages {
+                page.target_id = None;
+            }
+        }
+
+        let mut observed_navigations = Vec::new();
+        let mut ordered = runtime_pages.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|page| (Some(page.target_id.as_str()) != active_target_id) as u8);
+        for runtime in ordered {
+            let mut logical_index = self
+                .pages
+                .iter()
+                .position(|page| page.target_id.as_deref() == Some(&runtime.target_id));
+            if logical_index.is_none()
+                && active_target_id == Some(runtime.target_id.as_str())
+                && (local_relaunch
+                    || self.start_page_id.is_none()
+                    || self.last_active_page_id.as_ref().is_some_and(|page_id| {
+                        self.pages.iter().any(|page| {
+                            &page.page_id == page_id && page.target_id.is_none() && !page.closed
+                        })
+                    }))
+            {
+                logical_index = self.last_active_page_id.as_ref().and_then(|page_id| {
+                    self.pages
+                        .iter()
+                        .position(|page| &page.page_id == page_id && !page.closed)
+                });
+            }
+            let page_id = if let Some(index) = logical_index {
+                let page = &mut self.pages[index];
+                if observe_url_changes && !page.url.is_empty() && page.url != runtime.url {
+                    observed_navigations.push((page.page_id.clone(), runtime.url.clone()));
+                }
+                page.target_id = Some(runtime.target_id.clone());
+                if page.opener_target_id.is_none() {
+                    page.opener_target_id = runtime.opener_id.clone();
+                }
+                if update_page_urls {
+                    page.url = runtime.url.clone();
+                }
+                page.closed = false;
+                page.page_id.clone()
+            } else {
+                self.allocate_page(runtime)
+            };
+            self.sessions
+                .insert(runtime.session_id.clone(), page_id.clone());
+            if active_target_id == Some(runtime.target_id.as_str()) {
+                self.start_page_id.get_or_insert_with(|| page_id.clone());
+                self.last_active_page_id = Some(page_id);
+            }
+        }
+
+        for (page_id, url) in observed_navigations {
+            self.observe_navigation(&page_id, &url);
+        }
+
+        let active = active_target_id.and_then(|target_id| {
+            let runtime = runtime_pages
+                .iter()
+                .find(|page| page.target_id == target_id)?;
+            let page_id = self
+                .pages
+                .iter()
+                .find(|page| page.target_id.as_deref() == Some(target_id))?
+                .page_id
+                .clone();
+            Some(PageIdentity {
+                page_id,
+                target_id: runtime.target_id.clone(),
+                session_id: runtime.session_id.clone(),
+                url: runtime.url.clone(),
+            })
+        });
+        if let Some(identity) = &active {
+            self.last_url = Some(identity.url.clone());
+        }
+        active
+    }
+
+    pub fn scope_for_page(page: &PageIdentity) -> Scope {
+        Scope {
+            target: page.page_id.clone(),
+            frame: Vec::new(),
+        }
+    }
+
+    pub fn ensure_initial_page_state(
+        &mut self,
+        page: &PageIdentity,
+        viewport: Option<(i32, i32, f64, bool)>,
+    ) {
+        if self.initial_state_captured {
+            return;
+        }
+        let (width, height, scale, mobile) = viewport.unwrap_or((1280, 720, 1.0, false));
+        let scope = Self::scope_for_page(page);
+        self.capture_action(
+            "codegen_start",
+            vec![
+                Step::ScopedViewport {
+                    width: width.into(),
+                    height: height.into(),
+                    device_scale_factor: scale,
+                    is_mobile: mobile,
+                    scope: scope.clone(),
+                },
+                Step::ScopedNavigation {
+                    kind: NavigationKind::Goto,
+                    url: page.url.clone(),
+                    scope,
+                },
+            ],
+        );
+        self.viewport_emitted = true;
+        self.initial_state_captured = true;
+    }
+
+    pub fn page_for_target(&self, target_id: &str) -> Option<String> {
+        self.pages
+            .iter()
+            .find(|page| page.target_id.as_deref() == Some(target_id))
+            .map(|page| page.page_id.clone())
+    }
+
+    pub fn page_for_session(&self, session_id: &str) -> Option<String> {
+        self.sessions.get(session_id).cloned()
+    }
+
+    pub fn mark_page_closed(&mut self, page_id: &str) {
+        if let Some(page) = self.pages.iter_mut().find(|page| page.page_id == page_id) {
+            page.closed = true;
+            page.target_id = None;
+        }
+        self.pending_navigation.remove(page_id);
+        self.pending_popup.remove(page_id);
+    }
+
+    pub fn update_page_url(&mut self, page_id: &str, url: &str) {
+        if let Some(page) = self.pages.iter_mut().find(|page| page.page_id == page_id) {
+            page.url = url.to_string();
+        }
+        if self.last_active_page_id.as_deref() == Some(page_id)
+            || page_id == "main"
+            || page_id == "p1"
+        {
+            self.last_url = Some(url.to_string());
+        }
+    }
+
+    pub fn page_url(&self, page_id: &str) -> Option<&str> {
+        self.pages
+            .iter()
+            .find(|page| page.page_id == page_id)
+            .map(|page| page.url.as_str())
+            .or_else(|| {
+                (page_id == "main" || page_id == "p1")
+                    .then_some(self.last_url.as_deref())
+                    .flatten()
+            })
+    }
+
+    pub fn register_action_intent(&mut self, action_id: u64, page_id: &str) {
+        let Some(span) = self
+            .action_spans
+            .iter()
+            .find(|span| span.action_id == action_id)
+        else {
+            return;
+        };
+        let navigation = (span.start..span.start + span.len)
+            .rev()
+            .find(|index| can_assert_navigation(&self.steps[*index]));
+        let popup = (span.start..span.start + span.len)
+            .rev()
+            .find(|index| can_open_popup(&self.steps[*index]));
+        if let Some(step_index) = navigation {
+            self.pending_navigation.insert(
+                page_id.to_string(),
+                PendingStep {
+                    action_id,
+                    step_index,
+                },
+            );
+        }
+        if let Some(step_index) = popup {
+            if self.pending_popup.contains_key(page_id) {
+                self.capture_warning(
+                    "ambiguous-popup-origin",
+                    "More than one click can be the opener for a new page. Codegen did not guess the opener.",
+                    Some(action_id),
+                );
+                self.pending_popup.remove(page_id);
+            } else {
+                self.pending_popup.insert(
+                    page_id.to_string(),
+                    PendingStep {
+                        action_id,
+                        step_index,
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn observe_navigation(&mut self, page_id: &str, url: &str) -> bool {
+        self.update_page_url(page_id, url);
+        let Some(pending) = self.pending_navigation.get(page_id).cloned() else {
+            return false;
+        };
+        if let Some(step) = self.steps.get_mut(pending.step_index) {
+            attach_navigation(step, url);
+            return true;
+        }
+        false
+    }
+
+    pub fn observe_popup(&mut self, opener_target_id: &str, popup_page_id: &str) -> bool {
+        let Some(opener_page_id) = self.page_for_target(opener_target_id) else {
+            self.capture_warning(
+                "ambiguous-popup-origin",
+                "Chrome did not report a known opener page. Codegen did not guess the opener.",
+                None,
+            );
+            return false;
+        };
+        let Some(pending) = self.pending_popup.remove(&opener_page_id) else {
+            self.capture_warning(
+                "ambiguous-popup-origin",
+                "No pending click matches the new page opener. Codegen did not guess the opener.",
+                None,
+            );
+            return false;
+        };
+        if let Some(step) = self.steps.get_mut(pending.step_index) {
+            bind_popup(step, popup_page_id);
+            return true;
+        }
+        self.capture_warning(
+            "ambiguous-popup-origin",
+            "The pending popup action is not available. Codegen did not guess the opener.",
+            Some(pending.action_id),
+        );
+        false
+    }
+
+    pub fn bind_unattributed_popups(&mut self) {
+        let candidates = self
+            .pages
+            .iter()
+            .filter(|page| !page.popup_attributed)
+            .filter_map(|page| Some((page.page_id.clone(), page.opener_target_id.clone()?)))
+            .collect::<Vec<_>>();
+        for (page_id, opener_target_id) in candidates {
+            self.observe_popup(&opener_target_id, &page_id);
+            if let Some(page) = self.pages.iter_mut().find(|page| page.page_id == page_id) {
+                page.popup_attributed = true;
+            }
+        }
+    }
+
+    pub fn clear_runtime_bindings(&mut self, keep_targets: bool) {
+        self.sessions.clear();
+        self.main_frames.clear();
+        if !keep_targets {
+            for page in &mut self.pages {
+                page.target_id = None;
+            }
+        }
+    }
+
+    pub fn observe_cdp_navigation(
+        &mut self,
+        session_id: &str,
+        frame_id: &str,
+        url: &str,
+        main_frame_event: bool,
+    ) -> bool {
+        if main_frame_event {
+            self.main_frames
+                .insert(session_id.to_string(), frame_id.to_string());
+        } else if self.main_frames.get(session_id).map(String::as_str) != Some(frame_id) {
+            return false;
+        }
+        let Some(page_id) = self.page_for_session(session_id) else {
+            return false;
+        };
+        self.observe_navigation(&page_id, url)
+    }
+
+    pub fn pending_navigation_sessions(&self) -> Vec<(String, String)> {
+        self.pending_navigation
+            .keys()
+            .filter_map(|page_id| {
+                let session_id = self.sessions.iter().find_map(|(session_id, mapped_page)| {
+                    (mapped_page == page_id).then(|| session_id.clone())
+                })?;
+                Some((page_id.clone(), session_id))
+            })
+            .collect()
     }
 
     pub fn restore(session_id: &str) -> Self {
@@ -153,6 +548,12 @@ impl CodegenState {
         state.title = recovered.title;
         state.last_url = recovered.last_url.clone();
         state.persisted_last_url = recovered.last_url;
+        state.pages = recovered.page_state.pages.clone();
+        state.next_page_id = recovered.page_state.next_page_id.max(1);
+        state.start_page_id = recovered.page_state.start_page_id.clone();
+        state.last_active_page_id = recovered.page_state.last_active_page_id.clone();
+        state.initial_state_captured = recovered.page_state.initial_state_captured;
+        state.persisted_page_state = recovered.page_state;
         state.next_sequence = recovered.next_sequence;
         state.next_warning_id = recovered.next_warning_id;
         state.sidecar_path = Some(path.clone());
@@ -205,6 +606,25 @@ impl CodegenState {
             .steps
             .iter()
             .any(|step| matches!(step, Step::SetViewport { .. } | Step::ScopedViewport { .. }));
+        for span in &state.action_spans {
+            for step_index in span.start..span.start + span.len {
+                let Some(scope) = step_scope(&state.steps[step_index]) else {
+                    continue;
+                };
+                let pending = PendingStep {
+                    action_id: span.action_id,
+                    step_index,
+                };
+                if can_assert_navigation(&state.steps[step_index]) {
+                    state
+                        .pending_navigation
+                        .insert(scope.target.clone(), pending.clone());
+                }
+                if can_open_popup(&state.steps[step_index]) {
+                    state.pending_popup.insert(scope.target.clone(), pending);
+                }
+            }
+        }
         state
     }
 
@@ -404,6 +824,16 @@ pub fn persist(state: &mut CodegenState) -> Result<(), String> {
             }
         }
     }
+    let page_state = state.page_state();
+    if page_state != state.persisted_page_state {
+        match state.append_record(sidecar::JournalRecord::Pages(page_state.clone())) {
+            Ok(()) => state.persisted_page_state = page_state,
+            Err(error) => {
+                first_error.get_or_insert_with(|| error.clone());
+                state.mark_degraded(error);
+            }
+        }
+    }
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -570,6 +1000,19 @@ pub fn codegen_discard(state: &mut CodegenState, session_id: &str) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn page(tab_id: u32, target_id: &str, session_id: &str, url: &str) -> PageInfo {
+        PageInfo {
+            tab_id,
+            label: None,
+            target_id: target_id.to_string(),
+            opener_id: None,
+            session_id: session_id.to_string(),
+            url: url.to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        }
+    }
 
     #[test]
     fn private_element_capture_round_trips_without_public_fields() {
@@ -805,5 +1248,287 @@ mod tests {
             assert_eq!(status["state"], name);
             assert_eq!(status["active"], active);
         }
+    }
+
+    #[test]
+    fn logical_pages_are_monotonic_and_do_not_use_urls_or_tab_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        let pages = vec![
+            page(9, "target-a", "session-a", "https://example.com/same"),
+            page(9, "target-b", "session-b", "https://example.com/same"),
+        ];
+
+        let first = state
+            .sync_runtime_pages(&pages, Some("target-b"), false)
+            .unwrap();
+
+        assert_eq!(first.page_id, "p1");
+        assert_eq!(state.page_for_target("target-a").as_deref(), Some("p2"));
+        assert_ne!(
+            state.page_for_target("target-a"),
+            state.page_for_target("target-b")
+        );
+    }
+
+    #[test]
+    fn initial_page_state_is_scoped_to_p1() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        let runtime = page(1, "target-a", "session-a", "https://example.com/start");
+        let identity = state
+            .sync_runtime_pages(&[runtime], Some("target-a"), false)
+            .unwrap();
+
+        state.ensure_initial_page_state(&identity, Some((900, 700, 2.0, true)));
+
+        assert!(matches!(
+            &state.steps[0],
+            Step::ScopedViewport { scope, width: 900, .. } if scope.target == "p1"
+        ));
+        assert!(matches!(
+            &state.steps[1],
+            Step::ScopedNavigation { scope, url, .. }
+                if scope.target == "p1" && url == "https://example.com/start"
+        ));
+    }
+
+    #[test]
+    fn local_relaunch_rebinds_only_the_last_active_page() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        let first_pages = vec![
+            page(1, "target-a", "session-a", "https://example.com/a"),
+            page(2, "target-b", "session-b", "https://example.com/b"),
+        ];
+        state.sync_runtime_pages(&first_pages, Some("target-a"), false);
+        state.sync_runtime_pages(&first_pages, Some("target-b"), false);
+        state.clear_runtime_bindings(false);
+
+        let relaunched = state
+            .sync_runtime_pages(
+                &[page(1, "target-c", "session-c", "about:blank")],
+                Some("target-c"),
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(relaunched.page_id, "p2");
+        assert_eq!(state.page_for_target("target-c").as_deref(), Some("p2"));
+        assert_eq!(state.pages[0].target_id, None);
+    }
+
+    #[test]
+    fn external_reconnect_reuses_only_an_unchanged_target_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        state.sync_runtime_pages(
+            &[page(1, "target-a", "session-a", "https://example.com")],
+            Some("target-a"),
+            false,
+        );
+        state.clear_runtime_bindings(true);
+
+        let reused = state
+            .sync_runtime_pages(
+                &[page(7, "target-a", "session-new", "https://example.com")],
+                Some("target-a"),
+                false,
+            )
+            .unwrap();
+        let different = state
+            .sync_runtime_pages(
+                &[page(1, "target-b", "session-b", "https://example.com")],
+                Some("target-b"),
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(reused.page_id, "p1");
+        assert_eq!(different.page_id, "p2");
+    }
+
+    #[test]
+    fn popup_binding_uses_the_reported_opener_and_keeps_unique_page_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        let opener = page(1, "opener", "session-a", "https://example.com");
+        let identity = state
+            .sync_runtime_pages(&[opener.clone()], Some("opener"), false)
+            .unwrap();
+        state.initial_state_captured = true;
+        let action_id = state.capture_action(
+            "click",
+            vec![Step::Pointer {
+                target: Target {
+                    selectors: vec![SelectorKind::Css {
+                        value: "#open".to_string(),
+                    }],
+                    input_type: None,
+                },
+                kind: ClickKind::Click,
+                pointer: PointerKind::Mouse,
+                button: "left".to_string(),
+                count: 1,
+                position: None,
+                opens_popup: false,
+                popup_page: None,
+                scope: CodegenState::scope_for_page(&identity),
+                asserted_url: None,
+            }],
+        );
+        state.register_action_intent(action_id, "p1");
+        let mut popup = page(2, "popup-a", "session-b", "https://example.com/same");
+        popup.opener_id = Some("opener".to_string());
+        state.sync_runtime_pages(&[opener, popup], Some("opener"), false);
+        state.bind_unattributed_popups();
+
+        assert!(matches!(
+            state.steps.last(),
+            Some(Step::Pointer { popup_page: Some(page_id), .. }) if page_id == "p2"
+        ));
+
+        let action_id = state.capture_action(
+            "click",
+            vec![Step::Pointer {
+                target: Target {
+                    selectors: vec![SelectorKind::Css {
+                        value: "#open-again".to_string(),
+                    }],
+                    input_type: None,
+                },
+                kind: ClickKind::Click,
+                pointer: PointerKind::Mouse,
+                button: "left".to_string(),
+                count: 1,
+                position: None,
+                opens_popup: false,
+                popup_page: None,
+                scope: CodegenState::scope_for_page(&identity),
+                asserted_url: None,
+            }],
+        );
+        state.register_action_intent(action_id, "p1");
+        let mut second_popup = page(3, "popup-b", "session-c", "https://example.com/same");
+        second_popup.opener_id = Some("opener".to_string());
+        state.sync_runtime_pages(
+            &[
+                page(1, "opener", "session-a", "https://example.com"),
+                page(2, "popup-a", "session-b", "https://example.com/same"),
+                second_popup,
+            ],
+            Some("opener"),
+            false,
+        );
+        state.bind_unattributed_popups();
+
+        assert!(matches!(
+            state.steps.last(),
+            Some(Step::Pointer { popup_page: Some(page_id), .. }) if page_id == "p3"
+        ));
+    }
+
+    #[test]
+    fn ambiguous_popup_origin_is_warned_and_not_guessed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        let identity = state
+            .sync_runtime_pages(
+                &[page(1, "opener", "session-a", "https://example.com")],
+                Some("opener"),
+                false,
+            )
+            .unwrap();
+        state.initial_state_captured = true;
+        for selector in ["#one", "#two"] {
+            let action_id = state.capture_action(
+                "click",
+                vec![Step::Pointer {
+                    target: Target {
+                        selectors: vec![SelectorKind::Css {
+                            value: selector.to_string(),
+                        }],
+                        input_type: None,
+                    },
+                    kind: ClickKind::Click,
+                    pointer: PointerKind::Mouse,
+                    button: "left".to_string(),
+                    count: 1,
+                    position: None,
+                    opens_popup: false,
+                    popup_page: None,
+                    scope: CodegenState::scope_for_page(&identity),
+                    asserted_url: None,
+                }],
+            );
+            state.register_action_intent(action_id, "p1");
+        }
+        let mut popup = page(2, "popup", "session-b", "about:blank");
+        popup.opener_id = Some("opener".to_string());
+        state.sync_runtime_pages(
+            &[page(1, "opener", "session-a", "https://example.com"), popup],
+            Some("opener"),
+            false,
+        );
+        state.bind_unattributed_popups();
+
+        assert!(state
+            .capture_errors
+            .iter()
+            .any(|warning| warning.starts_with("ambiguous-popup-origin:")));
+        assert!(state.steps.iter().all(|step| !matches!(
+            step,
+            Step::Pointer {
+                popup_page: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn main_frame_and_same_document_events_update_a_press_assertion() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        let identity = state
+            .sync_runtime_pages(
+                &[page(1, "target-a", "session-a", "https://example.com")],
+                Some("target-a"),
+                false,
+            )
+            .unwrap();
+        let action_id = state.capture_action(
+            "press",
+            vec![Step::Press {
+                modifiers: Vec::new(),
+                key: "Enter".to_string(),
+                scope: CodegenState::scope_for_page(&identity),
+                asserted_url: None,
+            }],
+        );
+        state.register_action_intent(action_id, "p1");
+
+        assert!(state.observe_cdp_navigation(
+            "session-a",
+            "main-frame",
+            "https://example.com/next",
+            true,
+        ));
+        assert!(state.observe_cdp_navigation(
+            "session-a",
+            "main-frame",
+            "https://example.com/next#done",
+            false,
+        ));
+        assert!(!state.observe_cdp_navigation(
+            "session-a",
+            "child-frame",
+            "https://example.com/child",
+            false,
+        ));
+        assert!(matches!(
+            state.steps.last(),
+            Some(Step::Press { asserted_url: Some(url), .. })
+                if url == "https://example.com/next#done"
+        ));
     }
 }

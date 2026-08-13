@@ -40,7 +40,7 @@ fn page_for(
     lines: &mut Vec<String>,
     next_page: &mut usize,
 ) -> String {
-    if scope.target == "main" {
+    if scope.target == "main" || scope.target == "p1" {
         return "page".to_string();
     }
     if let Some(page) = pages.get(&scope.target) {
@@ -55,7 +55,6 @@ fn page_for(
     *next_page += 1;
     let page = format!("page{next_page}");
     lines.push(format!("  const {page} = await context.newPage();"));
-    lines.push(format!("  await {page}.goto({});", quote(&scope.target)));
     pages.insert(scope.target.clone(), page.clone());
     page
 }
@@ -233,6 +232,7 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
                 count,
                 position,
                 opens_popup,
+                popup_page,
                 scope,
                 asserted_url,
                 ..
@@ -271,7 +271,12 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
                     lines.push(format!(
                         "  const popup{next_popup} = await popupPromise{next_popup};"
                     ));
-                    pages.insert("__pending_popup".to_string(), format!("popup{next_popup}"));
+                    let popup = format!("popup{next_popup}");
+                    if let Some(page_id) = popup_page {
+                        pages.insert(page_id.clone(), popup);
+                    } else {
+                        pages.insert("__pending_popup".to_string(), popup);
+                    }
                 }
                 if let Some(url) = asserted_url {
                     let asserted_page = if *opens_popup {
@@ -397,14 +402,21 @@ pub fn render_playwright(title: &str, steps: &[Step]) -> String {
                 let paths = serde_json::to_string(paths).unwrap_or_else(|_| "[]".to_string());
                 lines.push(format!("  await {locator}.setInputFiles({paths});"));
             }
-            Step::NewPage { url, .. } => {
+            Step::NewPage { url, scope } => {
                 next_page += 1;
                 let page = format!("page{next_page}");
                 lines.push(format!("  const {page} = await context.newPage();"));
                 if let Some(url) = url {
                     lines.push(format!("  await {page}.goto({});", quote(url)));
-                    pages.insert(url.clone(), page);
                 }
+                pages.insert(scope.target.clone(), page);
+            }
+            Step::OpenPage { url, scope, .. } => {
+                next_page += 1;
+                let page = format!("page{next_page}");
+                lines.push(format!("  const {page} = await context.newPage();"));
+                lines.push(format!("  await {page}.goto({});", quote(url)));
+                pages.insert(scope.target.clone(), page);
             }
             Step::ClosePage { scope } => {
                 let page = page_for(scope, &mut pages, &mut lines, &mut next_page);

@@ -49,29 +49,29 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 
 ## Phase 3: Logical pages, popups, navigation, and relaunch
 
-- [ ] Add monotonic persisted codegen page IDs and runtime CDP target bindings
-- [ ] Capture active page identity before command dispatch
-- [ ] Make the start page `p1` and Recorder target `main`, including start-before-browser behavior
-- [ ] Capture initial URL and viewport when codegen starts on an existing page
-- [ ] Discover existing background pages without generating them until a recorded action uses them
-- [ ] Keep logical page identity separate from Recorder target URL and user-facing runtime `t<N>` IDs
-- [ ] Use handler results for explicit tab creation, switching, closing, and `click --new-tab`
-- [ ] Model `click --new-tab` as explicit page creation, not a natural popup click
-- [ ] Retain CDP `openerId` and bind natural popups to the correct pre-action opener page
-- [ ] Give every generated popup and page a unique logical identity
-- [ ] Warn and avoid causal guesses for ambiguous popup attribution
-- [ ] Keep one pending navigation-capable action and one popup-capable click per logical page
-- [ ] Process main-frame navigation, target lifecycle, redirects, and same-document navigation
-- [ ] Use successful handler URLs or a post-action URL read from the pre-action page session
-- [ ] Drain events before replacing pending actions and finalize live pending pages at stop without a fixed sleep
-- [ ] Add `navigation-check-failed` and missing-assertion diagnostics without exposing captured values
-- [ ] Rebind the last active logical page on local browser relaunch and keep other old pages unbound
-- [ ] Reuse logical pages on external reconnect only for unchanged CDP target IDs
-- [ ] Normalize top-level browser close without emitting a page-close step
-- [ ] Emit scoped close only for `tab close`
-- [ ] Test start on an existing URL, start before browser launch, same-URL tabs, repeated navigation, redirects, History API changes, hash changes, press Enter navigation, late navigation, URL-read failure, and stop finalization
-- [ ] Test explicit new page, two natural popups, ambiguous popup origin, tab switching, scoped tab close, local relaunch, and external reconnect
-- [ ] Commit: `fix(codegen): preserve page and navigation identity`
+- [x] Add monotonic persisted codegen page IDs and runtime CDP target bindings
+- [x] Capture active page identity before command dispatch
+- [x] Make the start page `p1` and Recorder target `main`, including start-before-browser behavior
+- [x] Capture initial URL and viewport when codegen starts on an existing page
+- [x] Discover existing background pages without generating them until a recorded action uses them
+- [x] Keep logical page identity separate from Recorder target URL and user-facing runtime `t<N>` IDs
+- [x] Use handler results for explicit tab creation, switching, closing, and `click --new-tab`
+- [x] Model `click --new-tab` as explicit page creation, not a natural popup click
+- [x] Retain CDP `openerId` and bind natural popups to the correct pre-action opener page
+- [x] Give every generated popup and page a unique logical identity
+- [x] Warn and avoid causal guesses for ambiguous popup attribution
+- [x] Keep one pending navigation-capable action and one popup-capable click per logical page
+- [x] Process main-frame navigation, target lifecycle, redirects, and same-document navigation
+- [x] Use successful handler URLs or a post-action URL read from the pre-action page session
+- [x] Drain events before replacing pending actions and finalize live pending pages at stop without a fixed sleep
+- [x] Add `navigation-check-failed` and missing-assertion diagnostics without exposing captured values
+- [x] Rebind the last active logical page on local browser relaunch and keep other old pages unbound
+- [x] Reuse logical pages on external reconnect only for unchanged CDP target IDs
+- [x] Normalize top-level browser close without emitting a page-close step
+- [x] Emit scoped close only for `tab close`
+- [x] Test start on an existing URL, start before browser launch, same-URL tabs, repeated navigation, redirects, History API changes, hash changes, press Enter navigation, late navigation, URL-read failure, and stop finalization
+- [x] Test explicit new page, two natural popups, ambiguous popup origin, tab switching, scoped tab close, local relaunch, and external reconnect
+- [x] Commit: `fix(codegen): preserve page and navigation identity`
 
 ## Phase 4: Faithful Recorder and Playwright emitters
 

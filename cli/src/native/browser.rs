@@ -130,6 +130,7 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
         page.url = target.url.clone();
         page.title = target.title.clone();
         page.target_type = target.target_type.clone();
+        page.opener_id = target.opener_id.clone();
         return true;
     }
     false
@@ -216,6 +217,8 @@ pub struct PageInfo {
     /// workflows.
     pub label: Option<String>,
     pub target_id: String,
+    /// CDP target ID of the page that opened this page, when Chrome reports it.
+    pub opener_id: Option<String>,
     pub session_id: String,
     pub url: String,
     pub title: String,
@@ -547,6 +550,7 @@ impl BrowserManager {
                 tab_id,
                 label: None,
                 target_id: "provider-page".to_string(),
+                opener_id: None,
                 session_id: String::new(),
                 url: String::new(),
                 title: String::new(),
@@ -616,6 +620,7 @@ impl BrowserManager {
                 tab_id,
                 label: None,
                 target_id: result.target_id,
+                opener_id: None,
                 session_id: attach_result.session_id.clone(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -643,6 +648,7 @@ impl BrowserManager {
                     tab_id,
                     label: None,
                     target_id: target.target_id.clone(),
+                    opener_id: target.opener_id.clone(),
                     session_id: attach_result.session_id.clone(),
                     url: target.url.clone(),
                     title: target.title.clone(),
@@ -1196,6 +1202,7 @@ impl BrowserManager {
             tab_id,
             label: None,
             target_id: result.target_id,
+            opener_id: None,
             session_id: attach_result.session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
@@ -1338,6 +1345,7 @@ impl BrowserManager {
             tab_id,
             label: label.clone(),
             target_id: result.target_id,
+            opener_id: None,
             session_id: attach.session_id,
             url: target_url.to_string(),
             title: String::new(),
@@ -1461,6 +1469,8 @@ impl BrowserManager {
             "tabId": format_tab_id(closed_tab_id),
             "label": closed_label,
             "closed": true,
+            "activeTabId": format_tab_id(self.pages[self.active_page_index].tab_id),
+            "activeUrl": self.pages[self.active_page_index].url,
         });
 
         // The close has already committed. The tab that becomes active may
@@ -2142,6 +2152,7 @@ mod tests {
     fn test_should_track_popup_target_with_empty_url() {
         let target = TargetInfo {
             target_id: "popup-1".to_string(),
+            opener_id: Some("page-1".to_string()),
             target_type: "page".to_string(),
             title: String::new(),
             url: String::new(),
@@ -2156,6 +2167,7 @@ mod tests {
     fn test_should_not_track_internal_chrome_target() {
         let target = TargetInfo {
             target_id: "chrome-tab".to_string(),
+            opener_id: None,
             target_type: "page".to_string(),
             title: "New Tab".to_string(),
             url: "chrome://newtab/".to_string(),
@@ -2172,6 +2184,7 @@ mod tests {
             tab_id: 1,
             label: None,
             target_id: "popup-1".to_string(),
+            opener_id: None,
             session_id: "session-1".to_string(),
             url: String::new(),
             title: String::new(),
@@ -2179,6 +2192,7 @@ mod tests {
         }];
         let target = TargetInfo {
             target_id: "popup-1".to_string(),
+            opener_id: Some("page-1".to_string()),
             target_type: "page".to_string(),
             title: "Popup".to_string(),
             url: "https://example.com/popup".to_string(),
@@ -2189,6 +2203,7 @@ mod tests {
         assert!(update_page_target_info_in_pages(&mut pages, &target));
         assert_eq!(pages[0].url, "https://example.com/popup");
         assert_eq!(pages[0].title, "Popup");
+        assert_eq!(pages[0].opener_id.as_deref(), Some("page-1"));
     }
 
     #[test]

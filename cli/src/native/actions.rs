@@ -19,7 +19,7 @@ use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
-    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
+    DispatchMouseEventParams, ExceptionThrownEvent, FrameNavigatedEvent, GetFullAXTreeResult,
     JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
     TargetInfoChangedEvent,
 };
@@ -233,6 +233,9 @@ struct DrainedEvents {
     /// while HAR recording; bodies are fetched for these in
     /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
     har_finished_requests: Vec<(String, Option<String>)>,
+    /// Main-frame and same-document navigation observations. The tuple is
+    /// (session ID, frame ID, URL, main-frame event).
+    codegen_navigations: Vec<(String, String, String, bool)>,
 }
 
 fn is_active_iframe_network_event(
@@ -1023,6 +1026,7 @@ impl DaemonState {
                             tab_id,
                             label: None,
                             target_id: target_info.target_id.clone(),
+                            opener_id: target_info.opener_id.clone(),
                             session_id: page_sid.clone(),
                             url: page_url,
                             title: target_info.title.clone(),
@@ -1150,6 +1154,7 @@ impl DaemonState {
                         tab_id,
                         label: None,
                         target_id: te.target_info.target_id.clone(),
+                        opener_id: te.target_info.opener_id.clone(),
                         session_id: attach.session_id.clone(),
                         url: page_url,
                         title: te.target_info.title.clone(),
@@ -1255,6 +1260,13 @@ impl DaemonState {
             self.refresh_active_iframe_sessions().await;
         }
 
+        if self.codegen.is_active() {
+            for (session_id, frame_id, url, main_frame_event) in &drained.codegen_navigations {
+                self.codegen
+                    .observe_cdp_navigation(session_id, frame_id, url, *main_frame_event);
+            }
+        }
+
         Ok(())
     }
 
@@ -1276,6 +1288,7 @@ impl DaemonState {
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
+        let mut codegen_navigations = Vec::new();
 
         loop {
             match rx.try_recv() {
@@ -1373,6 +1386,35 @@ impl DaemonState {
                             continue;
                         }
                         _ => {}
+                    }
+
+                    if event.method == "Page.frameNavigated" {
+                        if let (Some(session_id), Ok(navigation)) = (
+                            event.session_id.as_deref(),
+                            serde_json::from_value::<FrameNavigatedEvent>(event.params.clone()),
+                        ) {
+                            if navigation.frame.parent_id.is_none() {
+                                codegen_navigations.push((
+                                    session_id.to_string(),
+                                    navigation.frame.id,
+                                    navigation.frame.url,
+                                    true,
+                                ));
+                            }
+                        }
+                    } else if event.method == "Page.navigatedWithinDocument" {
+                        if let (Some(session_id), Some(frame_id), Some(url)) = (
+                            event.session_id.as_deref(),
+                            event.params.get("frameId").and_then(Value::as_str),
+                            event.params.get("url").and_then(Value::as_str),
+                        ) {
+                            codegen_navigations.push((
+                                session_id.to_string(),
+                                frame_id.to_string(),
+                                url.to_string(),
+                                false,
+                            ));
+                        }
                     }
 
                     let session_matches = if let Some(ref browser) = self.browser {
@@ -1730,6 +1772,7 @@ impl DaemonState {
             attached_other_sessions,
             detached_iframe_sessions,
             har_finished_requests,
+            codegen_navigations,
         }
     }
 }
@@ -2373,6 +2416,34 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    // Capture the page that will receive the command before dispatch. A tab
+    // command can change the active page before codegen sees the result.
+    let pre_browser_external = state
+        .browser
+        .as_ref()
+        .is_some_and(BrowserManager::is_cdp_connection);
+    let pre_action_page = if state.codegen.is_active() {
+        if let Some(browser) = state.browser.as_ref() {
+            let pages = browser.pages_list();
+            let active_target = browser.active_target_id().ok().map(str::to_string);
+            let local_relaunch = lifecycle_relaunched_browser && !browser.is_cdp_connection();
+            let page =
+                state
+                    .codegen
+                    .sync_runtime_pages(&pages, active_target.as_deref(), local_relaunch);
+            if let Some(page) = page.as_ref() {
+                state
+                    .codegen
+                    .ensure_initial_page_state(page, state.viewport);
+            }
+            page
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mut result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
@@ -2551,164 +2622,85 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     if let Ok(ref data) = result {
         if state.codegen.is_active() {
             let capture_start = state.codegen.steps.len();
-            let popup_opened = state.browser.as_ref().is_some_and(|browser| {
-                let tabs = browser.tab_list();
-                if state.codegen.known_tabs.is_empty() {
-                    state
-                        .codegen
-                        .known_tabs
-                        .extend(tabs.iter().filter_map(|tab| {
-                            tab.get("tabId").and_then(Value::as_str).map(str::to_string)
-                        }));
-                    return false;
-                }
-                let has_new_tab = tabs
-                    .iter()
-                    .filter_map(|tab| tab.get("tabId").and_then(Value::as_str))
-                    .any(|tab_id| !state.codegen.known_tabs.contains(tab_id));
-                if matches!(action, "click" | "tab_new" | "navigate") {
-                    state
-                        .codegen
-                        .known_tabs
-                        .extend(tabs.iter().filter_map(|tab| {
-                            tab.get("tabId").and_then(Value::as_str).map(str::to_string)
-                        }));
-                }
-                action == "click"
-                    && has_new_tab
-                    && !cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false)
-            });
-            // Target lifecycle events can arrive just after the click reply.
-            // If a later tab-management command is the first time we observe
-            // that tab, attach it to the most recent click as a popup.
-            if !popup_opened && matches!(action, "tab_switch" | "tab_list") {
-                let newly_observed_tab = state.browser.as_ref().is_some_and(|browser| {
-                    let tabs = browser.tab_list();
-                    if state.codegen.known_tabs.is_empty() {
-                        state
-                            .codegen
-                            .known_tabs
-                            .extend(tabs.iter().filter_map(|tab| {
-                                tab.get("tabId").and_then(Value::as_str).map(str::to_string)
-                            }));
-                        return false;
-                    }
-                    let is_new = tabs
-                        .iter()
-                        .filter_map(|tab| tab.get("tabId").and_then(Value::as_str))
-                        .any(|tab_id| !state.codegen.known_tabs.contains(tab_id));
-                    state
-                        .codegen
-                        .known_tabs
-                        .extend(tabs.iter().filter_map(|tab| {
-                            tab.get("tabId").and_then(Value::as_str).map(str::to_string)
-                        }));
-                    is_new
-                });
-                if newly_observed_tab {
-                    let popup_url = state.browser.as_ref().and_then(|browser| {
-                        browser
-                            .tab_list()
-                            .into_iter()
-                            .find(|tab| tab.get("active").and_then(Value::as_bool).unwrap_or(false))
-                            .and_then(|tab| {
-                                tab.get("url").and_then(Value::as_str).map(str::to_string)
-                            })
-                    });
-                    if let Some(click) = state.codegen.steps.iter_mut().rev().find(|step| {
-                        matches!(
-                            step,
-                            codegen::Step::Click { .. } | codegen::Step::Pointer { .. }
-                        )
-                    }) {
-                        codegen::mark_popup(click);
-                        if let Some(url) = popup_url.as_deref() {
-                            codegen::attach_navigation(click, url);
-                        }
-                        let _ = codegen::persist(&mut state.codegen);
-                    }
-                    if let Some(url) = popup_url {
-                        state.codegen.last_url = Some(url);
-                    }
-                }
+            let post_action_page = if let Some(browser) = state.browser.as_ref() {
+                let pages = browser.pages_list();
+                let active_target = browser.active_target_id().ok().map(str::to_string);
+                state
+                    .codegen
+                    .sync_action_result_pages(&pages, active_target.as_deref())
+            } else {
+                None
+            };
+            if let Some(page) = post_action_page.as_ref() {
+                state
+                    .codegen
+                    .ensure_initial_page_state(page, state.viewport);
             }
-            let scope = state
-                .browser
+
+            let before_scope = pre_action_page
                 .as_ref()
-                .map(|browser| {
-                    let active_tab = browser
-                        .tab_list()
-                        .into_iter()
-                        .find(|tab| tab.get("active").and_then(Value::as_bool).unwrap_or(false));
-                    if state.codegen.start_tab.is_none() {
-                        state.codegen.start_tab = active_tab
-                            .as_ref()
-                            .and_then(|tab| tab.get("tabId").and_then(Value::as_str))
-                            .map(str::to_string);
-                    }
-                    let target = active_tab
+                .map(codegen::CodegenState::scope_for_page)
+                .or_else(|| {
+                    post_action_page
                         .as_ref()
-                        .and_then(|tab| {
-                            let tab_id = tab.get("tabId").and_then(Value::as_str)?;
-                            (state.codegen.start_tab.as_deref() != Some(tab_id)).then(|| {
-                                tab.get("url")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("about:blank")
-                                    .to_string()
-                            })
-                        })
-                        .unwrap_or_else(|| "main".to_string());
-                    codegen::Scope {
-                        target,
-                        frame: Vec::new(),
-                    }
+                        .map(codegen::CodegenState::scope_for_page)
                 })
                 .unwrap_or_default();
+            let after_scope = post_action_page
+                .as_ref()
+                .map(codegen::CodegenState::scope_for_page);
             if let Err(error) = codegen::record_action(
                 action,
                 cmd,
                 data,
                 &state.ref_map,
                 state.viewport,
-                scope,
+                codegen::ActionContext {
+                    before: before_scope,
+                    after: after_scope,
+                },
                 element_capture.as_ref(),
                 &mut state.codegen,
             ) {
-                // Capture must never turn a successful browser action into a failure.
-                // The sidecar remains best-effort if the daemon's socket directory is unavailable.
-                let _ = error;
+                state
+                    .codegen
+                    .capture_warning("capture-failed", &error, None);
             }
+
+            // The action is now pending, so events from this command can bind
+            // to it without being assigned to an earlier action.
+            let _ = state.drain_cdp_events_background().await;
+            if let Some(browser) = state.browser.as_ref() {
+                let pages = browser.pages_list();
+                let active_target = browser.active_target_id().ok().map(str::to_string);
+                state
+                    .codegen
+                    .sync_runtime_pages(&pages, active_target.as_deref(), false);
+            }
+            state.codegen.bind_unattributed_popups();
+
             if state.codegen.steps.len() > capture_start {
-                if popup_opened {
-                    if let Some(step) = state.codegen.steps.last_mut() {
-                        codegen::mark_popup(step);
-                    }
-                }
-                let selector = cmd.get("selector").and_then(Value::as_str);
-                let capture_context = state.browser.as_ref().and_then(|browser| {
-                    browser
-                        .active_session_id()
-                        .ok()
-                        .map(|session_id| (browser.client.clone(), session_id.to_string()))
-                });
-                if let Some((client, session_id)) = capture_context {
-                    let probed_url = if let Some(capture) = element_capture.as_ref() {
-                        capture.probe.as_ref().and_then(|probe| probe.href.clone())
-                    } else {
-                        codegen::enrich_recent_steps(
+                if element_capture.is_none() {
+                    if let (Some(browser), Some(page)) =
+                        (state.browser.as_ref(), pre_action_page.as_ref())
+                    {
+                        let selector = cmd.get("selector").and_then(Value::as_str);
+                        let client = browser.client.clone();
+                        let _ = codegen::enrich_recent_steps(
                             &mut state.codegen.steps[capture_start..],
                             selector,
                             &state.ref_map,
                             &client,
-                            &session_id,
+                            &page.session_id,
                         )
-                        .await
-                    };
-                    if element_capture.is_none() {
+                        .await;
                         if let Some(frame_id) = state.active_frame_id.as_deref() {
-                            if let Ok(frame) =
-                                codegen::probe::frame_index_path(&client, &session_id, frame_id)
-                                    .await
+                            if let Ok(frame) = codegen::probe::frame_index_path(
+                                &client,
+                                &page.session_id,
+                                frame_id,
+                            )
+                            .await
                             {
                                 codegen::set_frame_scope(
                                     &mut state.codegen.steps[capture_start..],
@@ -2717,29 +2709,39 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                             }
                         }
                     }
-                    if !codegen::has_frame_scope(&state.codegen.steps[capture_start..]) {
-                        let current_url = match probed_url {
-                            Some(url) => Some(url),
-                            None => codegen::probe::probe_url(&client, &session_id).await.ok(),
-                        };
-                        if let Some(url) = current_url {
-                            if action != "navigate"
-                                && state
-                                    .codegen
-                                    .last_url
-                                    .as_deref()
-                                    .is_some_and(|last| last != url)
-                            {
-                                if let Some(step) = state.codegen.steps.last_mut() {
-                                    codegen::attach_navigation(step, &url);
-                                }
+                }
+
+                if codegen::action_can_navigate(action)
+                    && !(action == "click"
+                        && cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false))
+                {
+                    if let (Some(browser), Some(page)) =
+                        (state.browser.as_ref(), pre_action_page.as_ref())
+                    {
+                        match codegen::probe::probe_url(&browser.client, &page.session_id).await {
+                            Ok(url) if url != page.url => {
+                                state.codegen.observe_navigation(&page.page_id, &url);
                             }
-                            state.codegen.last_url = Some(url);
+                            Ok(_) => {}
+                            Err(_) => state.codegen.capture_warning(
+                                "navigation-check-failed",
+                                "Codegen could not read the post-action URL from the action page.",
+                                None,
+                            ),
                         }
                     }
                 }
-                let _ = codegen::persist(&mut state.codegen);
             }
+
+            if action == "tab_close" {
+                if let Some(page) = pre_action_page.as_ref() {
+                    state.codegen.mark_page_closed(&page.page_id);
+                }
+            }
+            if action == "close" {
+                state.codegen.clear_runtime_bindings(pre_browser_external);
+            }
+            let _ = codegen::persist(&mut state.codegen);
         }
     }
 
@@ -4993,7 +4995,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         )?;
 
         state.ref_map.clear();
-        {
+        let mut new_page = {
             let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
             mgr.tab_new(
                 if defer_url_until_controls {
@@ -5003,18 +5005,31 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 },
                 None,
             )
-            .await?;
-        }
+            .await?
+        };
 
         install_network_controls_or_close(state, has_proxy_creds).await?;
         state.drain_cdp_events_background().await?;
 
         if defer_url_until_controls {
             let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.navigate(&href, WaitUntil::Load).await?;
+            let navigation = mgr.navigate(&href, WaitUntil::Load).await?;
+            if let Some(object) = new_page.as_object_mut() {
+                if let Some(url) = navigation.get("url") {
+                    object.insert("url".to_string(), url.clone());
+                }
+                if let Some(title) = navigation.get("title") {
+                    object.insert("title".to_string(), title.clone());
+                }
+            }
         }
 
-        let mut data = json!({ "clicked": selector, "newTab": true, "url": href });
+        let mut data = json!({
+            "clicked": selector,
+            "newTab": true,
+            "url": href,
+            "tabId": new_page.get("tabId").cloned().unwrap_or(Value::Null),
+        });
         codegen::attach_private_capture(&mut data, capture);
         return Ok(data);
     }
@@ -6742,6 +6757,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             tab_id,
             label: None,
             target_id: create_result.target_id,
+            opener_id: None,
             session_id: new_session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
@@ -6796,18 +6812,22 @@ async fn handle_codegen_start(cmd: &Value, state: &mut DaemonState) -> Result<Va
         &state.session_id,
     )?;
     if let Some(browser) = state.browser.as_ref() {
-        state.codegen.last_url = browser.get_url().await.ok();
-        state.codegen.start_tab = browser
-            .tab_list()
-            .into_iter()
-            .find(|tab| tab.get("active").and_then(Value::as_bool).unwrap_or(false))
-            .and_then(|tab| tab.get("tabId").and_then(Value::as_str).map(str::to_string));
-        state.codegen.known_tabs.extend(
-            browser
-                .tab_list()
-                .iter()
-                .filter_map(|tab| tab.get("tabId").and_then(Value::as_str).map(str::to_string)),
-        );
+        let pages = browser.pages_list();
+        let active_target = browser.active_target_id().ok().map(str::to_string);
+        let current_url = browser.get_url().await.ok();
+        if let Some(mut page) =
+            state
+                .codegen
+                .sync_runtime_pages(&pages, active_target.as_deref(), false)
+        {
+            if let Some(url) = current_url {
+                page.url = url.clone();
+                state.codegen.update_page_url(&page.page_id, &url);
+            }
+            state
+                .codegen
+                .ensure_initial_page_state(&page, state.viewport);
+        }
         let _ = codegen::persist(&mut state.codegen);
     }
     Ok(result)
@@ -6816,22 +6836,33 @@ async fn handle_codegen_start(cmd: &Value, state: &mut DaemonState) -> Result<Va
 async fn handle_codegen_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if state.codegen.is_active() {
         if let Some(browser) = state.browser.as_ref() {
-            if let Ok(url) = browser.get_url().await {
-                if !codegen::has_frame_scope(
-                    &state.codegen.steps[state.codegen.steps.len().saturating_sub(1)..],
-                ) && state
-                    .codegen
-                    .last_url
-                    .as_deref()
-                    .is_some_and(|last| last != url)
-                {
-                    if let Some(step) = state.codegen.steps.last_mut() {
-                        codegen::attach_navigation(step, &url);
+            let pages = browser.pages_list();
+            let active_target = browser.active_target_id().ok().map(str::to_string);
+            state
+                .codegen
+                .sync_runtime_pages(&pages, active_target.as_deref(), false);
+            let client = browser.client.clone();
+            let pending = state.codegen.pending_navigation_sessions();
+            for (page_id, session_id) in pending {
+                match codegen::probe::probe_url(&client, &session_id).await {
+                    Ok(url) => {
+                        state.codegen.observe_navigation(&page_id, &url);
+                    }
+                    Err(_) => {
+                        state.codegen.capture_warning(
+                            "navigation-check-failed",
+                            "Codegen could not finalize the URL for a live page.",
+                            None,
+                        );
+                        state.codegen.capture_warning(
+                            "missing-navigation-assertion",
+                            "A pending action can navigate, but codegen could not confirm its final URL.",
+                            None,
+                        );
                     }
                 }
-                state.codegen.last_url = Some(url);
-                let _ = codegen::persist(&mut state.codegen);
             }
+            let _ = codegen::persist(&mut state.codegen);
         }
     }
     codegen::codegen_stop(
@@ -9516,6 +9547,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             tab_id,
             label: None,
             target_id: create_result.target_id,
+            opener_id: None,
             session_id: attach.session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
@@ -13462,6 +13494,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 tab_id: 1,
                 label: None,
                 target_id: "target-1".to_string(),
+                opener_id: None,
                 session_id: "session-1".to_string(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -13471,6 +13504,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 tab_id: 2,
                 label: None,
                 target_id: "target-2".to_string(),
+                opener_id: None,
                 session_id: "session-2".to_string(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -13480,6 +13514,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 tab_id: 3,
                 label: None,
                 target_id: "target-3".to_string(),
+                opener_id: None,
                 session_id: "session-1".to_string(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -13499,6 +13534,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             tab_id: 1,
             label: None,
             target_id: "provider-page".to_string(),
+            opener_id: None,
             session_id: String::new(),
             url: String::new(),
             title: String::new(),

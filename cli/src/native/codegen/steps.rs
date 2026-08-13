@@ -62,6 +62,21 @@ pub struct Scope {
     pub frame: Vec<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ActionContext {
+    pub before: Scope,
+    pub after: Option<Scope>,
+}
+
+impl From<Scope> for ActionContext {
+    fn from(before: Scope) -> Self {
+        Self {
+            before,
+            after: None,
+        }
+    }
+}
+
 impl Default for Scope {
     fn default() -> Self {
         Self {
@@ -169,6 +184,8 @@ pub enum Step {
         count: u8,
         position: Option<(f64, f64)>,
         opens_popup: bool,
+        #[serde(default)]
+        popup_page: Option<String>,
         scope: Scope,
         asserted_url: Option<String>,
     },
@@ -217,6 +234,11 @@ pub enum Step {
     },
     NewPage {
         url: Option<String>,
+        scope: Scope,
+    },
+    OpenPage {
+        url: String,
+        source_scope: Scope,
         scope: Scope,
     },
     ClosePage {
@@ -436,7 +458,8 @@ impl Step {
             | Self::Select { .. }
             | Self::Press { .. }
             | Self::Upload { .. }
-            | Self::NewPage { .. } => Value::Null,
+            | Self::NewPage { .. }
+            | Self::OpenPage { .. } => Value::Null,
         }
     }
 }
@@ -457,7 +480,7 @@ fn with_navigation(mut step: Value, url: &Option<String>) -> Value {
 }
 
 fn with_scope(mut step: Value, scope: &Scope) -> Value {
-    if scope.target != "main" {
+    if scope.target != "main" && scope.target != "p1" {
         step["target"] = json!(scope.target);
     }
     if !scope.frame.is_empty() {
@@ -573,48 +596,48 @@ fn action_support(action: &str) -> ActionSupport {
         "navigate" | "back" | "forward" | "reload" | "click" | "tap" | "dblclick" | "check"
         | "uncheck" | "hover" | "fill" | "setvalue" | "type" | "select" | "upload" | "press"
         | "scroll" | "viewport" | "isvisible" | "isenabled" | "ischecked" | "count" | "wait"
-        | "tab_new" => ActionSupport::Recorded,
+        | "tab_new" | "tab_close" => ActionSupport::Recorded,
         "snapshot" | "screenshot" | "gettext" | "getattribute" | "url" | "cdp_url" | "title"
         | "content" | "read" | "console" | "errors" | "inspect" | "boundingbox" | "innertext"
         | "innerhtml" | "inputvalue" | "styles" | "cookies_get" | "storage_get"
         | "session_info" | "state_save" | "credentials_get" | "credentials_list"
         | "credentials_delete" | "download" | "diff_snapshot" | "diff_url" | "responsebody"
         | "requests" | "request_detail" | "react_tree" | "react_inspect" | "react_suspense"
-        | "vitals" | "tab_list" | "stream_status" | "device_list" | "codegen_start"
-        | "codegen_stop" | "codegen_status" | "codegen_discard" | "close" => {
-            ActionSupport::Observation
-        }
+        | "vitals" | "tab_list" | "tab_switch" | "stream_status" | "device_list"
+        | "codegen_start" | "codegen_stop" | "codegen_status" | "codegen_discard" | "launch"
+        | "close" => ActionSupport::Observation,
         _ => ActionSupport::Omitted,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn record_action(
+pub fn record_action<C: Into<ActionContext>>(
     action: &str,
     cmd: &Value,
     data: &Value,
     refs: &RefMap,
     viewport: Option<(i32, i32, f64, bool)>,
-    scope: Scope,
+    context: C,
     capture: Option<&probe::ElementCapture>,
     state: &mut super::CodegenState,
 ) -> Result<(), String> {
     let mut steps = Vec::new();
     let mut omission = None;
-    let mut sc = scope;
+    let context = context.into();
+    let mut sc = context.before;
     if let Some(frame) = capture.and_then(|capture| capture.frame.as_ref()) {
         sc.frame = frame.clone();
     }
     match action {
         "navigate" => {
             if let Some(url) = cmd.get("url").and_then(Value::as_str) {
-                if state.last_url.as_deref() != Some(url) {
+                if state.page_url(&sc.target) != Some(url) {
                     steps.push(Step::ScopedNavigation {
                         kind: NavigationKind::Goto,
                         url: url.to_string(),
                         scope: sc.clone(),
                     });
-                    state.last_url = Some(url.to_string());
+                    state.update_page_url(&sc.target, url);
                 }
             }
         }
@@ -629,11 +652,21 @@ pub fn record_action(
                     url: url.to_string(),
                     scope: sc.clone(),
                 });
-                state.last_url = Some(url.to_string());
+                state.update_page_url(&sc.target, url);
             }
         }
         "click" | "tap" | "dblclick" | "check" | "uncheck" => {
-            if let Some(target) = target(cmd, refs, capture) {
+            if action == "click" && cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false) {
+                let url = data
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "The new page URL is not available for codegen.".to_string())?;
+                steps.push(Step::OpenPage {
+                    url: url.to_string(),
+                    source_scope: sc.clone(),
+                    scope: context.after.clone().unwrap_or_else(|| sc.clone()),
+                });
+            } else if let Some(target) = target(cmd, refs, capture) {
                 let kind = match action {
                     "check" => ClickKind::Check,
                     "uncheck" => ClickKind::Uncheck,
@@ -659,7 +692,8 @@ pub fn record_action(
                         cmd.get("clickCount").and_then(Value::as_u64).unwrap_or(1) as u8
                     },
                     position: capture.and_then(|capture| capture.position),
-                    opens_popup: cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false),
+                    opens_popup: false,
+                    popup_page: None,
                     scope: sc.clone(),
                     asserted_url: None,
                 });
@@ -829,8 +863,10 @@ pub fn record_action(
         "close" => return Ok(()),
         "tab_new" => steps.push(Step::NewPage {
             url: cmd.get("url").and_then(Value::as_str).map(str::to_string),
-            scope: sc.clone(),
+            scope: context.after.clone().unwrap_or_else(|| sc.clone()),
         }),
+        "tab_close" => steps.push(Step::ClosePage { scope: sc.clone() }),
+        "tab_switch" => return Ok(()),
         "snapshot" | "screenshot" | "gettext" | "getattribute" | "url" | "title" | "content"
         | "console" | "errors" | "inspect" | "boundingbox" | "innertext" | "innerhtml"
         | "inputvalue" | "styles" | "codegen_status" => return Ok(()),
@@ -846,13 +882,14 @@ pub fn record_action(
                 height: height.into(),
                 device_scale_factor: scale,
                 is_mobile: mobile,
-                scope: sc,
+                scope: sc.clone(),
             },
         );
         state.viewport_emitted = true;
     }
     if !steps.is_empty() || omission.is_some() {
         let action_id = state.capture_action(action, steps);
+        state.register_action_intent(action_id, &sc.target);
         if let Some(message) = omission {
             state.capture_warning("omitted-action", message, Some(action_id));
         }
@@ -961,9 +998,93 @@ pub fn attach_navigation(step: &mut Step, url: &str) {
     }
 }
 
+pub fn can_assert_navigation(step: &Step) -> bool {
+    matches!(
+        step,
+        Step::Click { .. }
+            | Step::Pointer { .. }
+            | Step::Change { .. }
+            | Step::Fill { .. }
+            | Step::SetValue { .. }
+            | Step::Type { .. }
+            | Step::Select { .. }
+            | Step::Press { .. }
+    )
+}
+
+pub fn action_can_navigate(action: &str) -> bool {
+    matches!(
+        action,
+        "click"
+            | "tap"
+            | "dblclick"
+            | "check"
+            | "uncheck"
+            | "fill"
+            | "setvalue"
+            | "type"
+            | "select"
+            | "press"
+    )
+}
+
+pub fn can_open_popup(step: &Step) -> bool {
+    matches!(
+        step,
+        Step::Click { .. }
+            | Step::Pointer {
+                pointer: PointerKind::Mouse,
+                ..
+            }
+    )
+}
+
+pub fn step_scope(step: &Step) -> Option<&Scope> {
+    match step {
+        Step::Click { scope, .. }
+        | Step::Hover { scope, .. }
+        | Step::Change { scope, .. }
+        | Step::KeyDown { scope, .. }
+        | Step::KeyUp { scope, .. }
+        | Step::Scroll { scope, .. }
+        | Step::WaitForElement { scope, .. }
+        | Step::ScopedViewport { scope, .. }
+        | Step::ScopedNavigation { scope, .. }
+        | Step::Pointer { scope, .. }
+        | Step::Fill { scope, .. }
+        | Step::SetValue { scope, .. }
+        | Step::Type { scope, .. }
+        | Step::Select { scope, .. }
+        | Step::Press { scope, .. }
+        | Step::Wheel { scope, .. }
+        | Step::Upload { scope, .. }
+        | Step::NewPage { scope, .. }
+        | Step::OpenPage { scope, .. }
+        | Step::ClosePage { scope } => Some(scope),
+        Step::SetViewport { .. } | Step::Navigate { .. } | Step::Close | Step::NewTab { .. } => {
+            None
+        }
+    }
+}
+
 pub fn mark_popup(step: &mut Step) {
     match step {
         Step::Click { opens_popup, .. } | Step::Pointer { opens_popup, .. } => *opens_popup = true,
+        _ => {}
+    }
+}
+
+pub fn bind_popup(step: &mut Step, page_id: &str) {
+    match step {
+        Step::Click { opens_popup, .. } => *opens_popup = true,
+        Step::Pointer {
+            opens_popup,
+            popup_page,
+            ..
+        } => {
+            *opens_popup = true;
+            *popup_page = Some(page_id.to_string());
+        }
         _ => {}
     }
 }
@@ -985,6 +1106,7 @@ pub fn set_frame_scope(steps: &mut [Step], frame: Vec<usize>) {
             | Step::ScopedNavigation { scope, .. }
             | Step::ScopedViewport { scope, .. }
             | Step::NewPage { scope, .. }
+            | Step::OpenPage { scope, .. }
             | Step::ClosePage { scope, .. }
             | Step::KeyDown { scope, .. }
             | Step::KeyUp { scope, .. }
@@ -1011,6 +1133,7 @@ pub fn has_frame_scope(steps: &[Step]) -> bool {
         | Step::ScopedNavigation { scope, .. }
         | Step::ScopedViewport { scope, .. }
         | Step::NewPage { scope, .. }
+        | Step::OpenPage { scope, .. }
         | Step::ClosePage { scope, .. }
         | Step::KeyDown { scope, .. }
         | Step::KeyUp { scope, .. }
@@ -1409,6 +1532,74 @@ mod tests {
         assert!(matches!(
             state.steps.iter().find(|step| matches!(step, Step::Pointer { target, .. } if target.selectors == vec![SelectorKind::Css { value: "#button".to_string() }])),
             Some(_)
+        ));
+    }
+
+    #[test]
+    fn explicit_link_opening_creates_a_page_without_a_popup_click() {
+        let mut state = CodegenState::new();
+        state.status = CodegenStatus::Active;
+        state.viewport_emitted = true;
+        record_action(
+            "click",
+            &json!({ "selector": "#docs", "newTab": true }),
+            &json!({ "url": "https://example.com/docs", "tabId": "t2" }),
+            &RefMap::new(),
+            None,
+            ActionContext {
+                before: Scope {
+                    target: "p1".to_string(),
+                    frame: Vec::new(),
+                },
+                after: Some(Scope {
+                    target: "p2".to_string(),
+                    frame: Vec::new(),
+                }),
+            },
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            state.steps.as_slice(),
+            [Step::OpenPage { url, source_scope, scope }]
+                if url == "https://example.com/docs"
+                    && source_scope.target == "p1"
+                    && scope.target == "p2"
+        ));
+        assert!(state.steps[0].to_recorder_json().is_null());
+    }
+
+    #[test]
+    fn tab_close_uses_the_pre_action_scope() {
+        let mut state = CodegenState::new();
+        state.status = CodegenStatus::Active;
+        state.viewport_emitted = true;
+        record_action(
+            "tab_close",
+            &json!({}),
+            &json!({ "tabId": "t2" }),
+            &RefMap::new(),
+            None,
+            ActionContext {
+                before: Scope {
+                    target: "p2".to_string(),
+                    frame: Vec::new(),
+                },
+                after: Some(Scope {
+                    target: "p1".to_string(),
+                    frame: Vec::new(),
+                }),
+            },
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            state.steps.as_slice(),
+            [Step::ClosePage { scope }] if scope.target == "p2"
         ));
     }
 

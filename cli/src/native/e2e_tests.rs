@@ -702,7 +702,13 @@ async fn e2e_codegen_captures_replayable_flow() {
             .iter()
             .map(|step| step["type"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["setViewport", "navigate", "click", "waitForElement"]
+        vec![
+            "setViewport",
+            "navigate",
+            "navigate",
+            "click",
+            "waitForElement"
+        ]
     );
 
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
@@ -768,6 +774,151 @@ async fn e2e_codegen_attaches_navigation_to_its_last_step() {
     assert_eq!(last_step["type"], "click");
     assert_eq!(last_step["assertedEvents"][0]["type"], "navigation");
     assert_eq!(last_step["assertedEvents"][0]["url"], "about:blank#done");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_preserves_enter_navigation_and_initial_url() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-enter-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-enter");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let initial_url = "data:text/html,<form action='about:blank%23entered'><input id=q></form>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": initial_url }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "codegen_start", "title": "enter" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "fill", "selector": "#q", "value": "value" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "press", "key": "Enter" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "6", "action": "codegen_stop", "format": "playwright" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let output = get_data(&stop)["output"]
+        .as_str()
+        .expect("Playwright output should be text");
+    assert!(
+        output.contains("page.goto('data:text/html,"),
+        "got: {output}"
+    );
+    assert!(output.contains("page.keyboard.press('Enter')"));
+    assert!(
+        output.contains("toHaveURL('about:blank?#entered')"),
+        "got: {output}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_starts_before_launch_and_rebinds_after_local_close() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-relaunch-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-relaunch");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "codegen_start", "title": "relaunch" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": "about:blank#first" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "4", "action": "close" }), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "navigate", "url": "about:blank#second" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "6", "action": "codegen_stop", "format": "playwright" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let output = get_data(&stop)["output"]
+        .as_str()
+        .expect("Playwright output should be text");
+    assert!(output.contains("page.goto('about:blank#first')"));
+    assert!(
+        output.contains("page.goto('about:blank#second')"),
+        "got: {output}"
+    );
+    assert!(!output.contains("const page2"));
+    assert!(!output.contains("page.close()"));
 
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
