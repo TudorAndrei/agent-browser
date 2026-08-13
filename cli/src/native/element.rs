@@ -425,7 +425,7 @@ pub async fn resolve_element_point(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ResolvedElementPoint, String> {
-    let element = resolve_element(
+    let mut element = resolve_element(
         client,
         session_id,
         ref_map,
@@ -440,7 +440,7 @@ pub async fn resolve_element_point(
             Some(&element.session_id),
         )
         .await;
-    let model: DomGetBoxModelResult = client
+    let model_result: Result<DomGetBoxModelResult, String> = client
         .send_command_typed(
             "DOM.getBoxModel",
             &DomGetBoxModelParams {
@@ -450,7 +450,38 @@ pub async fn resolve_element_point(
             },
             Some(&element.session_id),
         )
-        .await?;
+        .await;
+    let model = match model_result {
+        Ok(model) => model,
+        Err(error) => {
+            let Some(ref_id) = parse_ref(selector_or_ref) else {
+                return Err(error);
+            };
+            let entry = ref_map
+                .get(&ref_id)
+                .ok_or_else(|| format!("Unknown ref: {ref_id}"))?;
+            element =
+                resolve_fresh_ref(client, session_id, entry, &ref_id, iframe_sessions).await?;
+            let _ = client
+                .send_command(
+                    "DOM.scrollIntoViewIfNeeded",
+                    Some(serde_json::json!({ "objectId": element.object_id.clone() })),
+                    Some(&element.session_id),
+                )
+                .await;
+            client
+                .send_command_typed(
+                    "DOM.getBoxModel",
+                    &DomGetBoxModelParams {
+                        backend_node_id: None,
+                        node_id: None,
+                        object_id: Some(element.object_id.clone()),
+                    },
+                    Some(&element.session_id),
+                )
+                .await?
+        }
+    };
     let (x, y) = box_model_center(&model.model);
     check_object_interception(
         client,
@@ -604,38 +635,7 @@ pub async fn resolve_element(
             // backend_node_id is stale; re-query the accessibility tree below
         }
 
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
-            client,
-            session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
-        )
-        .await?;
-        let result: DomResolveNodeResult = client
-            .send_command_typed(
-                "DOM.resolveNode",
-                &DomResolveNodeParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_group: Some("agent-browser".to_string()),
-                },
-                Some(effective_session_id),
-            )
-            .await?;
-        let object_id = result
-            .object
-            .object_id
-            .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
-        return Ok(ResolvedElement {
-            object_id,
-            backend_node_id: Some(fresh_id),
-            session_id: effective_session_id.to_string(),
-            frame_id: entry.frame_id.clone(),
-        });
+        return resolve_fresh_ref(client, session_id, entry, &ref_id, iframe_sessions).await;
     }
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
@@ -697,6 +697,48 @@ pub async fn resolve_element(
         backend_node_id: None,
         session_id: session_id.to_string(),
         frame_id: None,
+    })
+}
+
+async fn resolve_fresh_ref(
+    client: &CdpClient,
+    session_id: &str,
+    entry: &RefEntry,
+    ref_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<ResolvedElement, String> {
+    let effective_session_id =
+        resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
+    let fresh_id = find_node_id_by_role_name(
+        client,
+        session_id,
+        &entry.role,
+        &entry.name,
+        entry.nth,
+        entry.frame_id.as_deref(),
+        iframe_sessions,
+    )
+    .await?;
+    let result: DomResolveNodeResult = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(fresh_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(effective_session_id),
+        )
+        .await?;
+    let object_id = result
+        .object
+        .object_id
+        .ok_or_else(|| format!("No objectId for ref {ref_id}"))?;
+    Ok(ResolvedElement {
+        object_id,
+        backend_node_id: Some(fresh_id),
+        session_id: effective_session_id.to_string(),
+        frame_id: entry.frame_id.clone(),
     })
 }
 

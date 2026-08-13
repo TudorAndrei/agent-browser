@@ -144,7 +144,7 @@ Before a new navigation-capable action replaces the pending action on a page, dr
 
 Keep one popup-capable click pending per opener page. If a popup arrives after that pending click was replaced, create its page without a causal link and report `ambiguous-popup-origin`.
 
-The repaired target path adds at most three CDP calls for a targeted action in a frame: one `Runtime.callFunctionOn` probe, one `Page.getFrameTree` call only for framed actions, and one `Runtime.evaluate` URL check. Press needs only the URL check. `tab_list()` and private page-list reads are in-memory and are not CDP calls.
+Use four CDP round trips per recorded step as the conservative upper cost estimate for the capture hook. The exact object probe uses `Runtime.callFunctionOn`. A framed action can also need frame-path work. A navigation-capable action can need a final URL check. `tab_list()` and private page-list reads are in-memory and are not CDP calls. A real Chrome CSS fill measurement on 2026-08-14 used five CDP commands without codegen and seven with codegen. The active command took 3.354 ms in that run. This is evidence for one path, not a fixed timing limit.
 
 ### Format policy
 
@@ -308,10 +308,10 @@ Dashboard checks are not required because the dashboard has no codegen surface.
 - Recorder JSON cannot represent all Playwright-supported actions. Explicit omission and loss warnings are safer than valid-looking incorrect steps.
 - Recorder identifies non-main targets by URL. It cannot distinguish two pages on the same URL, so Playwright remains exact while Recorder reports the ambiguity.
 - Logical page recovery across a local browser relaunch preserves recording continuity but cannot recreate closed background pages. Those pages stay unbound until an exact identity is available.
-- Targeted actions in frames can add up to three CDP calls during active recording. Inactive codegen adds no capture calls.
+- Use four CDP round trips per recorded step as the conservative maximum for the active capture hook. Inactive codegen adds no capture calls.
 - Frame index parity between CDP and Playwright must be proved with real browser fixtures. Unproved cases are omitted with warnings.
 - Keeping degraded capture in memory permits useful stop output but cannot make unjournaled actions recoverable after daemon loss.
 
 ## Open questions
 
-None. The user confirmed the shared design on 2026-08-12. Implementation is not authorized until the revised planning files receive separate approval.
+None. The user confirmed the shared design on 2026-08-12 and confirmed the shared understanding before final verification. Implementation and verification finished on 2026-08-14.

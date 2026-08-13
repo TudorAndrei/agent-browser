@@ -100,32 +100,32 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 
 ## Phase 5: Documentation and end-to-end verification
 
-- [ ] Audit `cli/src/output.rs` help, examples, warnings, and status formatting
-- [ ] Audit `README.md` command and feature documentation
-- [ ] Audit `skill-data/core/SKILL.md`, `skill-data/core/references/codegen.md`, and `skill-data/core/references/commands.md`
-- [ ] Audit `docs/src/app/codegen/page.mdx`, `docs/src/app/commands/page.mdx`, and `docs/src/app/security/page.mdx`
-- [ ] Audit MCP tool names, descriptions, schemas, argument conversion, and parity tests
-- [ ] Audit parser usage and error text and all affected inline source comments
-- [ ] Confirm that `skills/agent-browser/SKILL.md` has no feature content
-- [ ] Add or update ignored Chrome e2e tests for exact selectors, CSS password warning, selector omission, navigation assertion, same-URL tabs, popups, frames, browser relaunch, recovery, artifact writing, cleanup, and discard
-- [ ] Run `cargo test --manifest-path cli/Cargo.toml`
-- [ ] Run `cargo fmt --manifest-path cli/Cargo.toml -- --check`
-- [ ] Run `cargo clippy --manifest-path cli/Cargo.toml -- -D warnings`
-- [ ] Run `pnpm test:codegen-formats`
-- [ ] Run `pnpm --dir docs lint`
-- [ ] Run `pnpm --dir docs build`
-- [ ] Run `cargo test --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1`
-- [ ] Record codegen-active timing evidence and actual CDP command counts
-- [ ] Confirm that no dashboard or changelog changes were added
-- [ ] Commit: `docs(codegen): document durable flow generation`
+- [x] Audit `cli/src/output.rs` help, examples, warnings, and status formatting
+- [x] Audit `README.md` command and feature documentation
+- [x] Audit `skill-data/core/SKILL.md`, `skill-data/core/references/codegen.md`, and `skill-data/core/references/commands.md`
+- [x] Audit `docs/src/app/codegen/page.mdx`, `docs/src/app/commands/page.mdx`, and `docs/src/app/security/page.mdx`
+- [x] Audit MCP tool names, descriptions, schemas, argument conversion, and parity tests
+- [x] Audit parser usage and error text and all affected inline source comments
+- [x] Confirm that `skills/agent-browser/SKILL.md` has no feature content
+- [x] Add or update ignored Chrome e2e tests for exact selectors, CSS password warning, selector omission, navigation assertion, same-URL tabs, popups, frames, browser relaunch, recovery, artifact writing, cleanup, and discard
+- [x] Run `cargo test --manifest-path cli/Cargo.toml`
+- [x] Run `cargo fmt --manifest-path cli/Cargo.toml -- --check`
+- [x] Run `cargo clippy --manifest-path cli/Cargo.toml -- -D warnings`
+- [x] Run `pnpm test:codegen-formats`
+- [x] Run `pnpm --dir docs lint` (the command reaches an existing unrelated `theme-toggle.tsx` error and one existing `route.ts` warning; changed MDX files have no lint finding)
+- [x] Run `pnpm --dir docs build`
+- [x] Run `cargo test --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1`
+- [x] Record codegen-active timing evidence and actual CDP command counts
+- [x] Confirm that no dashboard or changelog changes were added
+- [x] Commit: `docs(codegen): document durable flow generation`
 
 ## Review
 
-- [ ] Code reviewed against every confirmed design decision in `PLAN.md`
-- [ ] CLI and MCP behavior remain aligned
-- [ ] All changed user-facing behavior is documented in the same phase
-- [ ] No warning message exposes typed, selected, uploaded, or credential values
-- [ ] No output format receives an empty, transient, guessed, or wrong-page target
-- [ ] No tombstone tests were added only to prove that removed behavior stays absent
-- [ ] Each phase commit is clean and uses the exact planned message
-- [ ] All TODO items are checked
+- [x] Code reviewed against every confirmed design decision in `PLAN.md`
+- [x] CLI and MCP behavior remain aligned
+- [x] All changed user-facing behavior is documented in the same phase
+- [x] No warning message exposes typed, selected, uploaded, or credential values
+- [x] No output format receives an empty, transient, guessed, or wrong-page target
+- [x] No tombstone tests were added only to prove that removed behavior stays absent
+- [x] Each phase commit is clean and uses the exact planned message
+- [x] All TODO items are checked

@@ -1781,8 +1781,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
-                Some("status") => Ok(json!({ "id": id, "action": "codegen_status" })),
-                Some("discard") => Ok(json!({ "id": id, "action": "codegen_discard" })),
+                Some("status") if rest.len() == 1 => {
+                    Ok(json!({ "id": id, "action": "codegen_status" }))
+                }
+                Some("discard") if rest.len() == 1 => {
+                    Ok(json!({ "id": id, "action": "codegen_discard" }))
+                }
+                Some("status") | Some("discard") => Err(ParseError::InvalidValue {
+                    message: format!("Unexpected codegen argument: {}", rest[1]),
+                    usage: "codegen <status|discard>",
+                }),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
@@ -4803,6 +4811,12 @@ mod tests {
         assert_eq!(status["action"], "codegen_status");
         let discard = parse_command(&args("codegen discard"), &default_flags()).unwrap();
         assert_eq!(discard["action"], "codegen_discard");
+        for input in ["codegen status extra", "codegen discard extra"] {
+            assert!(matches!(
+                parse_command(&args(input), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
         assert!(matches!(
             parse_command(&args("codegen stop --format nope"), &default_flags()),
             Err(ParseError::InvalidValue { .. })

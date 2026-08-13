@@ -344,7 +344,7 @@ agent-browser codegen stop ./login.flow.json
 agent-browser codegen stop ./login.spec.ts --format playwright
 ```
 
-`codegen status` reports active, restored, degraded, recovery-error, and cleanup-pending states. It also reports capture and omission warnings. Use `codegen discard` to remove an unfinished or damaged journal.
+`codegen status` reports active, restored, degraded, recovery-error, and cleanup-pending states. It also reports capture and security warning counts and projected Recorder and Playwright counts. `codegen stop` reports selected-format step counts and grouped warning codes. Use `codegen discard` to remove an unfinished or damaged journal.
 
 ## Auth vault
 

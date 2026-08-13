@@ -6835,6 +6835,13 @@ async fn handle_codegen_start(cmd: &Value, state: &mut DaemonState) -> Result<Va
 
 async fn handle_codegen_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if state.codegen.is_active() {
+        if !state.codegen.pending_navigation_sessions().is_empty() {
+            // Input dispatch can finish shortly before Chrome publishes the
+            // related navigation event. Give the event stream one bounded
+            // finalization window before the last URL probe.
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = state.drain_cdp_events_background().await;
+        }
         if let Some(browser) = state.browser.as_ref() {
             let pages = browser.pages_list();
             let active_target = browser.active_target_id().ok().map(str::to_string);

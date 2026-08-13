@@ -27,6 +27,29 @@ use crate::native::browser::PageInfo;
 
 const PRIVATE_CAPTURE_KEY: &str = "__agentBrowserCodegenCapture";
 
+fn warning_counts(state: &CodegenState, steps: &[Step]) -> (usize, usize) {
+    let security = usize::from(steps.iter().any(|step| {
+        matches!(
+            step,
+            Step::Change { .. }
+                | Step::Fill { .. }
+                | Step::SetValue { .. }
+                | Step::Type { .. }
+                | Step::Select { .. }
+                | Step::Upload { .. }
+        )
+    })) + usize::from(steps.iter().any(Step::has_password));
+    let capture = state
+        .capture_errors
+        .iter()
+        .filter(|warning| {
+            !warning.starts_with("typed-values-stored:")
+                && !warning.starts_with("password-value-stored:")
+        })
+        .count();
+    (capture, security)
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WarningSummary {
@@ -910,6 +933,7 @@ pub fn codegen_status(state: &CodegenState) -> Value {
         .filter(|issue| issue.omitted)
         .count();
     let playwright_lossy = playwright.issues.len() - playwright_omitted;
+    let (capture_warning_count, security_warning_count) = warning_counts(state, &state.steps);
     json!({
         "state": state.status,
         "active": state.is_active(),
@@ -918,6 +942,8 @@ pub fn codegen_status(state: &CodegenState) -> Value {
         "internalSteps": state.steps.len(),
         "capturedActions": state.action_spans.len(),
         "warningCount": state.capture_errors.len(),
+        "captureWarningCount": capture_warning_count,
+        "securityWarningCount": security_warning_count,
         "journalPath": state.sidecar_path,
         "captureErrors": state.capture_errors,
         "cleanupPaths": state.cleanup_paths,
@@ -1081,6 +1107,7 @@ pub fn codegen_stop(
     let omitted = issues.iter().filter(|issue| issue.omitted).count();
     let lossy = issues.len() - omitted;
     let warnings = grouped_format_warnings(&issues, &steps, &state.action_spans, format);
+    let (capture_warning_count, security_warning_count) = warning_counts(state, &steps);
     let mut data = json!({
         "state": "inactive",
         "active": false,
@@ -1094,8 +1121,8 @@ pub fn codegen_stop(
         "format": format,
         "flow": recorder.flow,
         "captureErrors": state.capture_errors,
-        "captureWarningCount": state.capture_errors.len(),
-        "securityWarningCount": usize::from(typed_values) + usize::from(!password_steps.is_empty()),
+        "captureWarningCount": capture_warning_count,
+        "securityWarningCount": security_warning_count,
         "cleanupWarningCount": state.cleanup_paths.len(),
         "warnings": warnings,
     });

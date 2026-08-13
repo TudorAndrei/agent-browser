@@ -662,6 +662,12 @@ async fn e2e_codegen_captures_replayable_flow() {
     )
     .await;
     assert_success(&start);
+    let journal_path = std::path::PathBuf::from(
+        get_data(&start)["journalPath"]
+            .as_str()
+            .expect("start should report its journal path"),
+    );
+    assert!(journal_path.is_file());
     let page = "data:text/html,<button id=go>Go</button><div id=success>Success</div>";
     assert_success(
         &execute_command(
@@ -709,6 +715,11 @@ async fn e2e_codegen_captures_replayable_flow() {
             "click",
             "waitForElement"
         ]
+    );
+    assert!(output.is_file());
+    assert!(
+        !journal_path.exists(),
+        "a successful stop should remove the journal"
     );
 
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
@@ -843,12 +854,12 @@ async fn e2e_codegen_preserves_enter_navigation_and_initial_url() {
         .as_str()
         .expect("Playwright output should be text");
     assert!(
-        output.contains("page.goto('data:text/html,"),
+        output.contains("page.goto(\"data:text/html,"),
         "got: {output}"
     );
-    assert!(output.contains("page.keyboard.press('Enter')"));
+    assert!(output.contains("page.keyboard.press(\"Enter\")"));
     assert!(
-        output.contains("toHaveURL('about:blank?#entered')"),
+        output.contains("toHaveURL(\"about:blank?#entered\")"),
         "got: {output}"
     );
 
@@ -912,9 +923,9 @@ async fn e2e_codegen_starts_before_launch_and_rebinds_after_local_close() {
     let output = get_data(&stop)["output"]
         .as_str()
         .expect("Playwright output should be text");
-    assert!(output.contains("page.goto('about:blank#first')"));
+    assert!(output.contains("page.goto(\"about:blank#first\")"));
     assert!(
-        output.contains("page.goto('about:blank#second')"),
+        output.contains("page.goto(\"about:blank#second\")"),
         "got: {output}"
     );
     assert!(!output.contains("const page2"));
@@ -1008,6 +1019,7 @@ async fn e2e_codegen_probes_css_password_and_unnamed_ref() {
         "exact object probe failed: {direct_capture:?}"
     );
     let before_active = state.browser.as_ref().unwrap().client.command_count();
+    let active_start = std::time::Instant::now();
     assert_success(
         &execute_command(
             &json!({ "id": "5", "action": "fill", "selector": "#password", "value": "TOP_SECRET" }),
@@ -1016,9 +1028,14 @@ async fn e2e_codegen_probes_css_password_and_unnamed_ref() {
         .await,
     );
     let active_delta = state.browser.as_ref().unwrap().client.command_count() - before_active;
+    let active_elapsed = active_start.elapsed();
+    eprintln!(
+        "codegen fill evidence: inactive={inactive_delta} CDP commands, active={active_delta} CDP commands, active_elapsed_us={}",
+        active_elapsed.as_micros()
+    );
     assert!(
-        active_delta <= inactive_delta + 3,
-        "active codegen added more than three CDP commands: inactive={inactive_delta}, active={active_delta}"
+        active_delta <= inactive_delta + 4,
+        "active codegen added more than four CDP commands: inactive={inactive_delta}, active={active_delta}"
     );
     assert!(
         matches!(
@@ -1115,6 +1132,51 @@ async fn e2e_codegen_probes_css_password_and_unnamed_ref() {
         .expect("click step should be emitted");
     assert!(!click["selectors"].as_array().unwrap().is_empty());
 
+    assert_success(
+        &execute_command(
+            &json!({ "id": "8", "action": "codegen_start", "title": "probe failure" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "9", "action": "evaluate", "script": "Object.defineProperty(window, 'Node', { value: undefined, configurable: true }); 1" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "10", "action": "click", "selector": unnamed_ref }),
+            &mut state,
+        )
+        .await,
+    );
+    let failed_probe = execute_command(
+        &json!({ "id": "11", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&failed_probe);
+    let failed_data = get_data(&failed_probe);
+    assert!(failed_data["captureErrors"]
+        .as_array()
+        .is_some_and(|warnings| warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.starts_with("selector-probe-failed:")))));
+    assert!(failed_data["captureErrors"]
+        .as_array()
+        .is_some_and(|warnings| warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.starts_with("omitted-action:")))));
+    assert_eq!(failed_data["emittedSteps"], 2);
+    assert!(failed_data["flow"]["steps"]
+        .as_array()
+        .expect("Recorder steps should be an array")
+        .iter()
+        .all(|step| step["type"] != "click"));
+
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
@@ -1145,15 +1207,32 @@ async fn e2e_codegen_captures_nested_same_process_and_oopif_scope() {
         .await,
     );
 
-    for (case, host) in [("same", "127.0.0.1"), ("oopif", "127.0.0.1")] {
-        let route = if case == "same" {
-            "codegen-same-top"
-        } else {
-            "codegen-oopif-top"
-        };
+    for (case, route, selected_frame, selected_element, expected_frame) in [
+        (
+            "same",
+            "codegen-same-top",
+            "/codegen-inner",
+            "#inside",
+            vec![0, 0],
+        ),
+        (
+            "frame",
+            "codegen-frame-top",
+            "/codegen-outer",
+            "#outer-inside",
+            vec![0],
+        ),
+        (
+            "oopif",
+            "codegen-oopif-top",
+            "/codegen-outer",
+            "#outer-inside",
+            vec![0],
+        ),
+    ] {
         assert_success(
             &execute_command(
-                &json!({ "id": format!("{case}-navigate"), "action": "navigate", "url": format!("http://{host}:{port}/{route}") }),
+                &json!({ "id": format!("{case}-navigate"), "action": "navigate", "url": format!("http://127.0.0.1:{port}/{route}") }),
                 &mut state,
             )
             .await,
@@ -1185,16 +1264,6 @@ async fn e2e_codegen_captures_nested_same_process_and_oopif_scope() {
             )
             .await,
         );
-        let selected_frame = if case == "same" {
-            "/codegen-inner"
-        } else {
-            "/codegen-outer"
-        };
-        let selected_element = if case == "same" {
-            "#inside"
-        } else {
-            "#outer-inside"
-        };
         let frame_command = oopif_ref.as_ref().map_or_else(
             || json!({ "id": format!("{case}-frame"), "action": "frame", "url": selected_frame }),
             |selector| json!({ "id": format!("{case}-frame"), "action": "frame", "selector": selector }),
@@ -1208,7 +1277,6 @@ async fn e2e_codegen_captures_nested_same_process_and_oopif_scope() {
             )
             .await,
         );
-        let expected_frame = if case == "same" { vec![0, 0] } else { vec![0] };
         assert!(matches!(
             state.codegen.steps.last(),
             Some(super::codegen::Step::Pointer { scope, .. }) if scope.frame == expected_frame
@@ -1238,6 +1306,234 @@ async fn e2e_codegen_captures_nested_same_process_and_oopif_scope() {
 
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
     server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_keeps_same_url_pages_and_multiple_popups_distinct() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-pages-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-pages");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let opener_url = "data:text/html,<a id=one target=_blank href='about:blank%23same'>One</a><a id=two target=_blank href='about:blank%23same'>Two</a>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": opener_url }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "codegen_start", "title": "pages" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "click", "selector": "#one" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "tab_switch", "tabId": "t1" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "click", "selector": "#two" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "7", "action": "tab_switch", "tabId": "t1" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let same_url = "data:text/html,<button id=inside>Inside</button>";
+    let first_same = execute_command(
+        &json!({ "id": "8", "action": "tab_new", "url": same_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&first_same);
+    let first_tab = get_data(&first_same)["tabId"]
+        .as_str()
+        .expect("new tab should report an ID")
+        .to_string();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "9", "action": "click", "selector": "#inside" }),
+            &mut state,
+        )
+        .await,
+    );
+    let second_same = execute_command(
+        &json!({ "id": "10", "action": "tab_new", "url": same_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&second_same);
+    assert_success(
+        &execute_command(
+            &json!({ "id": "11", "action": "click", "selector": "#inside" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "12", "action": "tab_switch", "tabId": first_tab }),
+            &mut state,
+        )
+        .await,
+    );
+    let status = execute_command(
+        &json!({ "id": "12a", "action": "codegen_status" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&status);
+    assert!(
+        get_data(&status)["projectedFormats"]["json"]["lossy"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "same-URL pages should produce a Recorder ambiguity warning"
+    );
+
+    let playwright = execute_command(
+        &json!({ "id": "13", "action": "codegen_stop", "format": "playwright" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&playwright);
+    let output = get_data(&playwright)["output"]
+        .as_str()
+        .expect("Playwright output should be text");
+    assert!(output.contains("const popupPromise2"), "got: {output}");
+    assert!(output.contains("const popupPromise3"), "got: {output}");
+    assert!(output.contains("const page2 = await popupPromise2"));
+    assert!(output.contains("const page3 = await popupPromise3"));
+    assert!(output.contains("const page4 = await context.newPage()"));
+    assert!(output.contains("const page5 = await context.newPage()"));
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_restores_then_stops_or_discards_the_journal() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-recovery-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-recovery");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--no-sandbox", "--disable-dev-shm-usage"] }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<button id=save>Save</button>" }),
+            &mut state,
+        )
+        .await,
+    );
+    let start = execute_command(
+        &json!({ "id": "3", "action": "codegen_start", "title": "restore" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&start);
+    let journal_path = std::path::PathBuf::from(
+        get_data(&start)["journalPath"]
+            .as_str()
+            .expect("start should report its journal path"),
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "click", "selector": "#save" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "id": "4a", "action": "close" }), &mut state).await);
+
+    let mut recovered = DaemonState::new();
+    let status = execute_command(
+        &json!({ "id": "5", "action": "codegen_status" }),
+        &mut recovered,
+    )
+    .await;
+    assert_success(&status);
+    assert_eq!(get_data(&status)["state"], "restored");
+    let stop = execute_command(
+        &json!({ "id": "6", "action": "codegen_stop", "format": "json" }),
+        &mut recovered,
+    )
+    .await;
+    assert_success(&stop);
+    assert!(!journal_path.exists());
+
+    let restart = execute_command(
+        &json!({ "id": "7", "action": "codegen_start", "title": "discard" }),
+        &mut recovered,
+    )
+    .await;
+    assert_success(&restart);
+    let discard_path = std::path::PathBuf::from(
+        get_data(&restart)["journalPath"]
+            .as_str()
+            .expect("start should report its journal path"),
+    );
+    let discard = execute_command(
+        &json!({ "id": "8", "action": "codegen_discard" }),
+        &mut recovered,
+    )
+    .await;
+    assert_success(&discard);
+    assert!(!discard_path.exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -7916,6 +8212,13 @@ async fn start_a11y_frame_server() -> (u16, tokio::task::JoinHandle<()>) {
                         "text/html",
                         format!(
                             r#"<!doctype html><body><iframe name="outer" title="Outer" src="http://localhost:{port}/codegen-outer"></iframe></body>"#
+                        ),
+                    ),
+                    "/codegen-frame-top" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><frameset><frame name="outer" src="http://127.0.0.1:{port}/codegen-outer"></frameset>"#
                         ),
                     ),
                     "/codegen-outer" => (

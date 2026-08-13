@@ -2957,12 +2957,16 @@ fn call_record_start(arguments: &Value, action: &str) -> Result<Value, ProtocolE
 }
 
 fn call_codegen_start(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, codegen_start_args(arguments)?, None)
+}
+
+fn codegen_start_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["codegen".to_string(), "start".to_string()];
     if let Some(title) = optional_string(arguments, "title")? {
         args.push("--title".to_string());
         args.push(title);
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_codegen_stop(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4314,6 +4318,17 @@ mod tests {
             codegen_stop["inputSchema"]["properties"]["format"]["enum"],
             json!(["json", "playwright"])
         );
+    }
+
+    #[test]
+    fn codegen_start_mcp_arguments_use_the_cli_parser_shape() {
+        let arguments = json!({ "title": "checkout" });
+        let mcp_args = codegen_start_args(&arguments).unwrap();
+        let flags = crate::flags::parse_flags(&mcp_args);
+        let parsed = crate::commands::parse_command(&mcp_args, &flags).unwrap();
+
+        assert_eq!(parsed["action"], "codegen_start");
+        assert_eq!(parsed["title"], "checkout");
     }
 
     #[test]
