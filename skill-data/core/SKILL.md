@@ -347,6 +347,8 @@ agent-browser codegen stop ./checkout.spec.ts --format playwright
 
 Use `agent-browser codegen status` to inspect warnings or a restored flow. Use `agent-browser codegen discard` to remove an unfinished or damaged flow. See [references/codegen.md](references/codegen.md). Recorded values, including passwords and upload paths, are stored verbatim, and unfinished flows survive daemon restarts through an owner-only append-only journal.
 
+Recorder JSON has a smaller action set than Playwright. Read the grouped format warnings and emitted, omitted, and lossy counts from `codegen stop`. Use Playwright when the flow needs sequential typing, multi-select, upload, exact page identity, or explicit page creation.
+
 ### Iframes
 
 Iframes are auto-inlined in the snapshot — their refs work transparently:

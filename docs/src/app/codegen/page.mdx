@@ -40,3 +40,11 @@ Direct CSS selectors, <code>xpath=</code> selectors, snapshot refs with accessib
 ## Security
 
 Typed values are included verbatim for replay fidelity. This includes password values, selected values, and upload paths. The in-progress append-only journal is stored with owner-only permissions in the daemon socket directory, so an unfinished flow survives a daemon restart. Use `codegen status` to inspect warnings and recovery state. Use `codegen discard` to remove the journal. A successful stop removes the journal. Inspect generated artifacts and do not commit credentials.
+
+## Format support
+
+Recorder JSON omits sequential typing, multi-value select, upload, key chords, and explicit page creation because its schema cannot keep the exact action intent. It converts back, forward, and reload to navigation to the observed final URL and reports a lossy warning. Recorder identifies a non-main page by URL, so two pages with the same URL are ambiguous.
+
+Playwright keeps typed selector kinds, multi-value select, upload paths, typing clear mode and delay, modifier chords, pointer input, element and page scroll, logical page identity, scoped close, and initial mobile context options.
+
+`codegen stop` reports captured actions, internal steps, emitted steps, omitted steps, and lossy steps. Its grouped warnings include a stable code, count, affected action IDs, selected format, and emitted step numbers when applicable.

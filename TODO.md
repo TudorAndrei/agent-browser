@@ -75,28 +75,28 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 
 ## Phase 4: Faithful Recorder and Playwright emitters
 
-- [ ] Render Recorder and Playwright from typed selectors and typed actions instead of shared flattened strings
-- [ ] Emit only non-empty schema-valid Recorder selectors
-- [ ] Omit Recorder multi-select, upload, type, explicit page creation, and unsupported waits with stable format warnings
-- [ ] Emit back, forward, and reload as observed Recorder navigation only when a final URL exists, with a lossy warning
-- [ ] Emit Recorder page targets from current URL and warn when same-URL pages are ambiguous
-- [ ] Emit full Playwright multi-value `selectOption`, `setInputFiles`, `pressSequentially`, clear mode, delay, normalized chords, pointer input, page and element scroll, page scope, viewport scope, and scoped close
-- [ ] Use unique Playwright variables for all logical pages and popups
-- [ ] Render CSS and XPath correctly for Playwright
-- [ ] Replace manual quote escaping with real JavaScript string serialization
-- [ ] Render initial context viewport, device scale, mobile, and touch options; warn on unsupported later mode changes
-- [ ] Prove `frameLocator('iframe, frame').nth(index)` mapping with `<iframe>`, `<frame>`, nested-frame, and OOPIF fixtures; omit and warn when mapping is not safe
-- [ ] Return structured grouped warnings with stable code, count, up to ten action IDs, affected format, and format-specific emitted step number when applicable
-- [ ] Return captured action, internal step, emitted, omitted, lossy, capture warning, security warning, and cleanup warning counts
-- [ ] Add universal typed-value and stronger confirmed-password warnings without including captured values
-- [ ] Pin exact root development dependencies `@puppeteer/replay` 4.0.2 and `@playwright/test` 1.62.1 with pnpm
-- [ ] Add shared golden artifacts under `cli/src/native/codegen/test-fixtures/`
-- [ ] Add Rust golden comparisons against production renderer output
-- [ ] Add a root Node conformance test that parses the same Recorder fixture and runs Playwright `--list` on the same generated spec
-- [ ] Add `test:codegen-formats` and a separate Node CI job with frozen pnpm install
-- [ ] Cover every supported step, hostile strings and line terminators, two popups, same-URL tabs, nested frames, mobile context, multi-select, upload, chords, scoped navigation, scoped viewport, scoped close, omissions, and loss warnings in shared fixtures
-- [ ] Update format support and security documentation in the same change
-- [ ] Commit: `fix(codegen): generate schema-valid faithful test artifacts`
+- [x] Render Recorder and Playwright from typed selectors and typed actions instead of shared flattened strings
+- [x] Emit only non-empty schema-valid Recorder selectors
+- [x] Omit Recorder multi-select, upload, type, explicit page creation, and unsupported waits with stable format warnings
+- [x] Emit back, forward, and reload as observed Recorder navigation only when a final URL exists, with a lossy warning
+- [x] Emit Recorder page targets from current URL and warn when same-URL pages are ambiguous
+- [x] Emit full Playwright multi-value `selectOption`, `setInputFiles`, `pressSequentially`, clear mode, delay, normalized chords, pointer input, page and element scroll, page scope, viewport scope, and scoped close
+- [x] Use unique Playwright variables for all logical pages and popups
+- [x] Render CSS and XPath correctly for Playwright
+- [x] Replace manual quote escaping with real JavaScript string serialization
+- [x] Render initial context viewport, device scale, mobile, and touch options; warn on unsupported later mode changes
+- [x] Prove `frameLocator('iframe, frame').nth(index)` mapping with `<iframe>`, `<frame>`, nested-frame, and OOPIF fixtures; omit and warn when mapping is not safe
+- [x] Return structured grouped warnings with stable code, count, up to ten action IDs, affected format, and format-specific emitted step number when applicable
+- [x] Return captured action, internal step, emitted, omitted, lossy, capture warning, security warning, and cleanup warning counts
+- [x] Add universal typed-value and stronger confirmed-password warnings without including captured values
+- [x] Pin exact root development dependencies `@puppeteer/replay` 4.0.2 and `@playwright/test` 1.62.1 with pnpm
+- [x] Add shared golden artifacts under `cli/src/native/codegen/test-fixtures/`
+- [x] Add Rust golden comparisons against production renderer output
+- [x] Add a root Node conformance test that parses the same Recorder fixture and runs Playwright `--list` on the same generated spec
+- [x] Add `test:codegen-formats` and a separate Node CI job with frozen pnpm install
+- [x] Cover every supported step, hostile strings and line terminators, two popups, same-URL tabs, nested frames, mobile context, multi-select, upload, chords, scoped navigation, scoped viewport, scoped close, omissions, and loss warnings in shared fixtures
+- [x] Update format support and security documentation in the same change
+- [x] Commit: `fix(codegen): generate schema-valid faithful test artifacts`
 
 ## Phase 5: Documentation and end-to-end verification
 

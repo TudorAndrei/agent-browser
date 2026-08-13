@@ -47,9 +47,14 @@ impl Target {
                 // test IDs. Building CSS from the raw value here can change
                 // its meaning for quotes or other CSS syntax characters.
                 SelectorKind::TestId { .. } => None,
-                SelectorKind::Role { name, .. } => Some(vec![format!("aria/{name}")]),
-                SelectorKind::Css { value } => Some(vec![value.clone()]),
-                SelectorKind::XPath { value } => Some(vec![format!("xpath/{value}")]),
+                SelectorKind::Role { name, .. } if !name.is_empty() => {
+                    Some(vec![format!("aria/{name}")])
+                }
+                SelectorKind::Css { value } if !value.is_empty() => Some(vec![value.clone()]),
+                SelectorKind::XPath { value } if !value.is_empty() => {
+                    Some(vec![format!("xpath/{value}")])
+                }
+                _ => None,
             })
             .collect()
     }
@@ -487,6 +492,54 @@ fn with_scope(mut step: Value, scope: &Scope) -> Value {
         step["frame"] = json!(scope.frame);
     }
     step
+}
+
+fn recorder_issue(step: &Step) -> Option<(&'static str, &'static str, bool)> {
+    match step {
+        Step::Type { .. } => Some((
+            "recorder-type-omitted",
+            "Recorder JSON cannot represent sequential typing or typing delay.",
+            true,
+        )),
+        Step::Select { values, .. } if values.len() != 1 => Some((
+            "recorder-multi-select-omitted",
+            "Recorder JSON cannot represent a multi-value select.",
+            true,
+        )),
+        Step::Press { .. } => Some((
+            "recorder-key-chord-omitted",
+            "Recorder JSON cannot represent a key chord as one exact action.",
+            true,
+        )),
+        Step::Upload { .. } => Some((
+            "recorder-upload-omitted",
+            "Recorder JSON cannot represent file upload.",
+            true,
+        )),
+        Step::NewPage { .. } | Step::OpenPage { .. } | Step::NewTab { .. } => Some((
+            "recorder-page-create-omitted",
+            "Recorder JSON cannot represent explicit page creation.",
+            true,
+        )),
+        Step::ScopedNavigation {
+            kind: NavigationKind::Back | NavigationKind::Forward | NavigationKind::Reload,
+            ..
+        } => Some((
+            "recorder-history-navigation-lossy",
+            "Recorder JSON converts back, forward, or reload to navigation to the observed URL.",
+            false,
+        )),
+        _ if step.to_recorder_json().is_null() => Some((
+            "recorder-step-omitted",
+            "Recorder JSON cannot safely represent this captured step.",
+            true,
+        )),
+        _ => None,
+    }
+}
+
+pub fn recorder_issue_for_step(step: &Step) -> Option<(&'static str, &'static str, bool)> {
+    recorder_issue(step)
 }
 
 fn selector_target(selector: &str, refs: &RefMap) -> Target {

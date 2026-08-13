@@ -8,7 +8,7 @@ pub mod probe;
 mod sidecar;
 mod steps;
 
-pub use playwright::render_playwright;
+pub use playwright::{render_playwright_with_report, FormatIssue};
 pub use probe::ElementCapture;
 #[allow(unused_imports)]
 pub use steps::{
@@ -20,11 +20,157 @@ pub use steps::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::native::browser::PageInfo;
 
 const PRIVATE_CAPTURE_KEY: &str = "__agentBrowserCodegenCapture";
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WarningSummary {
+    code: String,
+    message: String,
+    count: usize,
+    affected_action_ids: Vec<u64>,
+    format: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    emitted_steps: Vec<usize>,
+}
+
+fn grouped_format_warnings(
+    issues: &[FormatIssue],
+    steps: &[Step],
+    spans: &[ActionSpan],
+    format: &str,
+) -> Vec<WarningSummary> {
+    let mut emitted_number = HashMap::new();
+    let mut next_emitted = 1usize;
+    for (index, step) in steps.iter().enumerate() {
+        let emitted = if format == "json" {
+            !step.to_recorder_json().is_null()
+        } else {
+            !issues
+                .iter()
+                .any(|issue| issue.step_index == index && issue.omitted)
+        };
+        if emitted {
+            emitted_number.insert(index, next_emitted);
+            next_emitted += 1;
+        }
+    }
+    let mut grouped = BTreeMap::<(&str, &str), Vec<&FormatIssue>>::new();
+    for issue in issues {
+        grouped
+            .entry((issue.code, issue.message))
+            .or_default()
+            .push(issue);
+    }
+    grouped
+        .into_iter()
+        .map(|((code, message), issues)| {
+            let mut affected_action_ids = issues
+                .iter()
+                .filter_map(|issue| {
+                    spans
+                        .iter()
+                        .find(|span| {
+                            issue.step_index >= span.start
+                                && issue.step_index < span.start + span.len
+                        })
+                        .map(|span| span.action_id)
+                })
+                .collect::<Vec<_>>();
+            affected_action_ids.sort_unstable();
+            affected_action_ids.dedup();
+            affected_action_ids.truncate(10);
+            let emitted_steps = issues
+                .iter()
+                .filter_map(|issue| emitted_number.get(&issue.step_index).copied())
+                .collect::<Vec<_>>();
+            WarningSummary {
+                code: code.to_string(),
+                message: message.to_string(),
+                count: issues.len(),
+                affected_action_ids,
+                format: format.to_string(),
+                emitted_steps,
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Default)]
+struct RenderedRecorder {
+    flow: Value,
+    emitted: usize,
+    issues: Vec<FormatIssue>,
+}
+
+fn render_recorder(
+    title: &str,
+    steps: &[Step],
+    pages: &[sidecar::PersistedPage],
+) -> RenderedRecorder {
+    let page_urls = pages
+        .iter()
+        .map(|page| (page.page_id.as_str(), page.url.as_str()))
+        .collect::<HashMap<_, _>>();
+    let duplicate_urls = pages
+        .iter()
+        .fold(HashMap::<&str, usize>::new(), |mut counts, page| {
+            *counts.entry(page.url.as_str()).or_default() += 1;
+            counts
+        });
+    let mut emitted_steps = Vec::new();
+    let mut issues = Vec::new();
+    let mut warned_ambiguous_pages = HashSet::new();
+    for (step_index, step) in steps.iter().enumerate() {
+        if let Some((code, message, omitted)) = steps::recorder_issue_for_step(step) {
+            issues.push(FormatIssue {
+                code,
+                message,
+                step_index,
+                omitted,
+            });
+        }
+        let mut value = step.to_recorder_json();
+        if value.is_null() {
+            continue;
+        }
+        if let Some(logical_id) = value.get("target").and_then(Value::as_str) {
+            if let Some(url) = page_urls.get(logical_id) {
+                if duplicate_urls.get(url).copied().unwrap_or_default() > 1
+                    && warned_ambiguous_pages.insert(logical_id.to_string())
+                {
+                    issues.push(FormatIssue {
+                        code: "recorder-page-target-ambiguous",
+                        message:
+                            "Recorder JSON uses a URL target that identifies more than one page.",
+                        step_index,
+                        omitted: false,
+                    });
+                }
+                value["target"] = json!(url);
+            } else {
+                issues.push(FormatIssue {
+                    code: "recorder-page-target-omitted",
+                    message: "Recorder JSON omitted a step because its page URL is not available.",
+                    step_index,
+                    omitted: true,
+                });
+                continue;
+            }
+        }
+        emitted_steps.push(value);
+    }
+    RenderedRecorder {
+        emitted: emitted_steps.len(),
+        flow: json!({ "title": title, "steps": emitted_steps }),
+        issues,
+    }
+}
 
 /// Add capture data to an internal handler value. The dispatcher removes it
 /// before it creates the public command response.
@@ -754,17 +900,32 @@ pub fn codegen_start(
 }
 
 pub fn codegen_status(state: &CodegenState) -> Value {
+    let recorder = render_recorder(&state.title, &state.steps, &state.pages);
+    let playwright = render_playwright_with_report(&state.title, &state.steps);
+    let recorder_omitted = recorder.issues.iter().filter(|issue| issue.omitted).count();
+    let recorder_lossy = recorder.issues.len() - recorder_omitted;
+    let playwright_omitted = playwright
+        .issues
+        .iter()
+        .filter(|issue| issue.omitted)
+        .count();
+    let playwright_lossy = playwright.issues.len() - playwright_omitted;
     json!({
         "state": state.status,
         "active": state.is_active(),
         "title": state.title,
         "steps": state.steps.len(),
+        "internalSteps": state.steps.len(),
         "capturedActions": state.action_spans.len(),
         "warningCount": state.capture_errors.len(),
         "journalPath": state.sidecar_path,
         "captureErrors": state.capture_errors,
         "cleanupPaths": state.cleanup_paths,
         "artifactPath": state.artifact_path,
+        "projectedFormats": {
+            "json": { "emitted": recorder.emitted, "omitted": recorder_omitted, "lossy": recorder_lossy },
+            "playwright": { "emitted": playwright.emitted, "omitted": playwright_omitted, "lossy": playwright_lossy },
+        },
     })
 }
 
@@ -877,11 +1038,16 @@ pub fn codegen_stop(
             }
         }
     };
-    let flow = json!({ "title": state.title, "steps": steps.iter().map(Step::to_recorder_json).filter(|step| !step.is_null()).collect::<Vec<_>>() });
-    let output = if format == "playwright" {
-        render_playwright(&state.title, &steps)
+    let recorder = render_recorder(&state.title, &steps, &state.pages);
+    let playwright = render_playwright_with_report(&state.title, &steps);
+    let (output, emitted, issues) = if format == "playwright" {
+        (playwright.output, playwright.emitted, playwright.issues)
     } else {
-        serde_json::to_string_pretty(&flow).map_err(|error| error.to_string())?
+        (
+            serde_json::to_string_pretty(&recorder.flow).map_err(|error| error.to_string())?,
+            recorder.emitted,
+            recorder.issues,
+        )
     };
     if let Some(path) = path {
         sidecar::write_output_atomic(Path::new(path), &output)?;
@@ -901,15 +1067,37 @@ pub fn codegen_stop(
         .enumerate()
         .filter_map(|(index, step)| step.has_password().then_some(index + 1))
         .collect();
+    let typed_values = steps.iter().any(|step| {
+        matches!(
+            step,
+            Step::Change { .. }
+                | Step::Fill { .. }
+                | Step::SetValue { .. }
+                | Step::Type { .. }
+                | Step::Select { .. }
+                | Step::Upload { .. }
+        )
+    });
+    let omitted = issues.iter().filter(|issue| issue.omitted).count();
+    let lossy = issues.len() - omitted;
+    let warnings = grouped_format_warnings(&issues, &steps, &state.action_spans, format);
     let mut data = json!({
         "state": "inactive",
         "active": false,
         "title": state.title,
         "steps": steps.len(),
+        "internalSteps": steps.len(),
+        "emittedSteps": emitted,
+        "omittedSteps": omitted,
+        "lossySteps": lossy,
         "capturedActions": state.action_spans.len(),
         "format": format,
-        "flow": flow,
+        "flow": recorder.flow,
         "captureErrors": state.capture_errors,
+        "captureWarningCount": state.capture_errors.len(),
+        "securityWarningCount": usize::from(typed_values) + usize::from(!password_steps.is_empty()),
+        "cleanupWarningCount": state.cleanup_paths.len(),
+        "warnings": warnings,
     });
     if let Some(path) = path {
         data["path"] = json!(path);
@@ -925,6 +1113,10 @@ pub fn codegen_stop(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    } else if typed_values {
+        data["warning"] = json!(
+            "The recording stores typed values and file paths verbatim. Review the artifact before you share or commit it."
+        );
     }
 
     state.status = CodegenStatus::Inactive;
@@ -1251,6 +1443,87 @@ mod tests {
     }
 
     #[test]
+    fn production_renderer_matches_shared_recorder_fixture() {
+        let target = Target {
+            selectors: vec![SelectorKind::Css {
+                value: "#submit".to_string(),
+            }],
+            input_type: None,
+        };
+        let steps = vec![
+            Step::ScopedViewport {
+                width: 1280,
+                height: 720,
+                device_scale_factor: 1.0,
+                is_mobile: false,
+                scope: Scope {
+                    target: "p1".to_string(),
+                    frame: Vec::new(),
+                },
+            },
+            Step::ScopedNavigation {
+                kind: NavigationKind::Goto,
+                url: "https://example.com/start".to_string(),
+                scope: Scope {
+                    target: "p1".to_string(),
+                    frame: Vec::new(),
+                },
+            },
+            Step::Pointer {
+                target: target.clone(),
+                kind: ClickKind::Click,
+                pointer: PointerKind::Mouse,
+                button: "right".to_string(),
+                count: 1,
+                position: Some((4.0, 8.0)),
+                opens_popup: false,
+                popup_page: None,
+                scope: Scope {
+                    target: "p1".to_string(),
+                    frame: Vec::new(),
+                },
+                asserted_url: Some("https://example.com/done".to_string()),
+            },
+            Step::Fill {
+                target,
+                value: "line one\nline two".to_string(),
+                scope: Scope {
+                    target: "p2".to_string(),
+                    frame: vec![0, 1],
+                },
+                asserted_url: None,
+            },
+            Step::ClosePage {
+                scope: Scope {
+                    target: "p2".to_string(),
+                    frame: Vec::new(),
+                },
+            },
+        ];
+        let pages = vec![
+            sidecar::PersistedPage {
+                page_id: "p1".to_string(),
+                target_id: None,
+                opener_target_id: None,
+                popup_attributed: true,
+                url: "https://example.com/start".to_string(),
+                closed: false,
+            },
+            sidecar::PersistedPage {
+                page_id: "p2".to_string(),
+                target_id: None,
+                opener_target_id: None,
+                popup_attributed: true,
+                url: "https://example.com/other".to_string(),
+                closed: false,
+            },
+        ];
+        let rendered = render_recorder("hostile \"flow\"\nname", &steps, &pages);
+        let output = serde_json::to_string_pretty(&rendered.flow).unwrap();
+        assert_eq!(output, include_str!("test-fixtures/flow.json").trim_end());
+    }
+
+    #[test]
     fn logical_pages_are_monotonic_and_do_not_use_urls_or_tab_ids() {
         let directory = tempfile::tempdir().unwrap();
         let mut state = restored_state(&directory);
@@ -1269,6 +1542,39 @@ mod tests {
             state.page_for_target("target-a"),
             state.page_for_target("target-b")
         );
+    }
+
+    #[test]
+    fn selected_format_reports_grouped_omissions_and_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        state.capture_action(
+            "type",
+            vec![Step::Type {
+                target: Target {
+                    selectors: vec![SelectorKind::Css {
+                        value: "#field".to_string(),
+                    }],
+                    input_type: None,
+                },
+                text: "secret".to_string(),
+                clear: false,
+                delay_ms: Some(5),
+                scope: Scope::default(),
+                asserted_url: None,
+            }],
+        );
+
+        let result = codegen_stop(&mut state, None, "json").unwrap();
+
+        assert_eq!(result["capturedActions"], 1);
+        assert_eq!(result["internalSteps"], 1);
+        assert_eq!(result["emittedSteps"], 0);
+        assert_eq!(result["omittedSteps"], 1);
+        assert_eq!(result["lossySteps"], 0);
+        assert_eq!(result["warnings"][0]["code"], "recorder-type-omitted");
+        assert_eq!(result["warnings"][0]["affectedActionIds"], json!([1]));
+        assert_eq!(result["securityWarningCount"], 1);
     }
 
     #[test]

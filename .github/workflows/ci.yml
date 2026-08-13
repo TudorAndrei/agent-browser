@@ -49,6 +49,28 @@ jobs:
       - name: Run Rust tests
         run: cargo test --profile ci --manifest-path cli/Cargo.toml
 
+  codegen-formats:
+    name: Codegen Format Conformance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate generated formats
+        run: pnpm test:codegen-formats
+
   dashboard:
     name: Dashboard
     runs-on: ubuntu-latest
