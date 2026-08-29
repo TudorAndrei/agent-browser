@@ -3263,6 +3263,9 @@ available localhost port automatically and reports it back.
 Notes:
   - 'stream enable' creates the WebSocket server.
   - WebSocket clients trigger frame streaming automatically.
+  - On Chrome, URL messages follow full-document, History API, and fragment
+    navigation in the active tab's main frame. Child-frame and background-tab
+    navigation does not emit URL messages.
   - Frames are delivered latest-first: the newest frame is picked at send
     time, so frames produced during an in-flight write are skipped, never
     queued. Input events dispatch immediately, independent of frame
@@ -3631,6 +3634,7 @@ Examples:
   agent-browser skills list
   agent-browser skills get core
   agent-browser skills get core --full
+  agent-browser skills get protected-vercel-deployments
   agent-browser skills get electron --full
   agent-browser skills get --all
   agent-browser skills path core
@@ -3723,7 +3727,8 @@ Start here (for AI agents):
   Skills ship with the CLI (always version-matched) and include workflow
   patterns, ref/selector usage, and copy-paste examples. Prefer this over
   guessing commands from flag docs alone. Specialized skills cover Electron
-  apps, Slack, exploratory testing, and cloud browser providers.
+  apps, Slack, exploratory testing, protected Vercel deployments, and cloud
+  browser providers.
 
   skills [list]                List available skills
   skills get core              Core usage guide (overview + common patterns)
@@ -3938,6 +3943,9 @@ Options:
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS, NO_PROXY)
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
+  --ca-cert <path>           Trust a specific CA certificate for HTTPS interception proxies
+                             (or AGENT_BROWSER_CA_CERT; local Chromium on Linux; install --with-deps provides certutil)
+  --no-ca-cert               Clear CA trust retained by the running browser session
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
                              Use --hide-scrollbars false to keep scrollbars visible
@@ -4022,6 +4030,8 @@ Environment:
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
+  AGENT_BROWSER_CA_CERT          Path to CA certificate to trust (HTTPS interception proxies)
+  AGENT_BROWSER_CLEAR_CA_CERT    Clear CA trust retained by the running browser session
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
