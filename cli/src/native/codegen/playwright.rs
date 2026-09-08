@@ -1,4 +1,7 @@
-use super::{ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target};
+use super::{
+    single_element_target, ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step,
+    Target,
+};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,33 +21,6 @@ pub struct RenderedPlaywright {
 
 fn js(value: &str) -> String {
     serde_json::to_string(value).expect("a Rust string is valid JSON")
-}
-
-/// The target of a step that addresses exactly one element. A count assertion
-/// matches several on purpose, so it is not one of these.
-fn single_element_target(step: &Step) -> Option<&Target> {
-    match step {
-        Step::Click { target, .. }
-        | Step::Pointer { target, .. }
-        | Step::Hover { target, .. }
-        | Step::Change { target, .. }
-        | Step::Fill { target, .. }
-        | Step::SetValue { target, .. }
-        | Step::Type { target, .. }
-        | Step::Select { target, .. }
-        | Step::Upload { target, .. } => Some(target),
-        Step::WaitForElement {
-            target,
-            count: None,
-            ..
-        } => Some(target),
-        // `Scroll` renders as `mouse.wheel`, which uses no locator at all.
-        Step::Wheel {
-            target: Some(target),
-            ..
-        } => Some(target),
-        _ => None,
-    }
 }
 
 /// `single` marks a step that acted on one element. Playwright refuses a
@@ -785,6 +761,29 @@ mod tests {
                 url: Some("https://example.com/same".into()),
                 scope: Scope {
                     target: "p3".into(),
+                    frame: Vec::new(),
+                    page_url: None,
+                },
+            },
+            // A snapshot ref: the primary capture path, and the only one that
+            // produces a role locator.
+            Step::Hover {
+                target: Target {
+                    selectors: vec![
+                        SelectorKind::Role {
+                            role: "button".into(),
+                            name: "Save \"now\"".into(),
+                            nth: None,
+                        },
+                        SelectorKind::Css {
+                            value: "#save".into(),
+                        },
+                    ],
+                    input_type: None,
+                    verified: true,
+                },
+                scope: Scope {
+                    target: "p1".into(),
                     frame: Vec::new(),
                     page_url: None,
                 },

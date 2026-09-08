@@ -16,6 +16,7 @@ test("hostile \"flow\"\nname", async ({ page, context }) => {
   await page2.goto("https://example.com/same");
   const page3 = await context.newPage();
   await page3.goto("https://example.com/same");
+  await page.getByRole("button", { name: "Save \"now\"", exact: true }).hover();
   await page2.close();
 });
 

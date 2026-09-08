@@ -13,8 +13,8 @@ pub use probe::ElementCapture;
 pub use steps::{
     action_breaks_navigation_attribution, action_can_navigate, action_is_omitted,
     attach_navigation, bind_popup, can_assert_navigation, can_open_popup, enrich_recent_steps,
-    record_action, set_frame_scope, step_scope, ActionContext, ClickKind, NavigationKind,
-    PointerKind, Scope, SelectorKind, Step, Target,
+    record_action, set_frame_scope, single_element_target, step_scope, ActionContext, ClickKind,
+    NavigationKind, PointerKind, Scope, SelectorKind, Step, Target,
 };
 
 use serde::{Deserialize, Serialize};
@@ -188,6 +188,17 @@ fn render_recorder(
                 });
                 continue;
             }
+        }
+        // Recorder resolves a selector with `querySelector`, which is the
+        // first match, exactly as the command did. Report it, so the two
+        // formats warn alike about the same unverified target.
+        if steps::single_element_target(step).is_some_and(|target| !target.verified) {
+            issues.push(FormatIssue {
+                code: "recorder-target-not-unique",
+                message: "Recorder uses the first match, because the recorded selector was not verified to address one element.",
+                step_index,
+                omitted: false,
+            });
         }
         emitted_steps.push(value);
     }
@@ -1599,6 +1610,29 @@ mod tests {
                     page_url: None,
                 },
                 asserted_url: None,
+            },
+            // A snapshot ref: the primary capture path, and the only one that
+            // produces an accessible-name selector.
+            Step::Hover {
+                target: Target {
+                    selectors: vec![
+                        SelectorKind::Role {
+                            role: "button".to_string(),
+                            name: "Save \"now\"".to_string(),
+                            nth: None,
+                        },
+                        SelectorKind::Css {
+                            value: "#save".to_string(),
+                        },
+                    ],
+                    input_type: None,
+                    verified: true,
+                },
+                scope: Scope {
+                    target: "p1".to_string(),
+                    frame: Vec::new(),
+                    page_url: None,
+                },
             },
             Step::ClosePage {
                 scope: Scope {

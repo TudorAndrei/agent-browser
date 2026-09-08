@@ -46,6 +46,19 @@
       "value": "line one\nline two"
     },
     {
+      "offsetX": 0,
+      "offsetY": 0,
+      "selectors": [
+        [
+          "aria/Save \"now\""
+        ],
+        [
+          "#save"
+        ]
+      ],
+      "type": "hover"
+    },
+    {
       "target": "https://example.com/other",
       "type": "close"
     }

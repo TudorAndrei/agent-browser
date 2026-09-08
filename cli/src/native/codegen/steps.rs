@@ -1246,6 +1246,33 @@ pub fn can_open_popup(step: &Step) -> bool {
     )
 }
 
+/// The target of a step that addresses exactly one element. A count assertion
+/// matches several on purpose, so it is not one of these.
+pub fn single_element_target(step: &Step) -> Option<&Target> {
+    match step {
+        Step::Click { target, .. }
+        | Step::Pointer { target, .. }
+        | Step::Hover { target, .. }
+        | Step::Change { target, .. }
+        | Step::Fill { target, .. }
+        | Step::SetValue { target, .. }
+        | Step::Type { target, .. }
+        | Step::Select { target, .. }
+        | Step::Upload { target, .. } => Some(target),
+        Step::WaitForElement {
+            target,
+            count: None,
+            ..
+        } => Some(target),
+        // `Scroll` renders as `mouse.wheel`, which uses no locator at all.
+        Step::Wheel {
+            target: Some(target),
+            ..
+        } => Some(target),
+        _ => None,
+    }
+}
+
 pub fn step_scope(step: &Step) -> Option<&Scope> {
     match step {
         Step::Click { scope, .. }

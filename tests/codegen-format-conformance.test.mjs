@@ -13,7 +13,11 @@ test('the shared Recorder fixture passes the supported parser', async () => {
   const source = await readFile(new URL('flow.json', fixtureRoot), 'utf8');
   const flow = parse(JSON.parse(source));
   assert.equal(flow.title, 'hostile "flow"\nname');
-  assert.equal(flow.steps.length, 5);
+  assert.equal(flow.steps.length, 6);
+  // The accessible-name selector is the primary capture path, and the name
+  // here carries quotes that the runner has to escape.
+  const hover = flow.steps.find(step => step.type === 'hover');
+  assert.deepEqual(hover.selectors[0], ['aria/Save "now"']);
 });
 
 test('the shared Playwright fixture compiles and collects', async () => {
