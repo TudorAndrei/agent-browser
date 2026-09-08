@@ -670,7 +670,13 @@ fn action_support(action: &str) -> ActionSupport {
 /// run arbitrary page script, so neither can keep an earlier pending
 /// assertion. A missing assertion is safer than a false one.
 pub fn action_breaks_navigation_attribution(action: &str) -> bool {
-    action == "recording_start" || matches!(action_support(action), ActionSupport::Omitted)
+    action == "recording_start" || action_is_omitted(action)
+}
+
+/// The command was successful, but codegen cannot express it. Its page effect
+/// is unknown, so the URL it leaves behind needs a check and a warning.
+pub fn action_is_omitted(action: &str) -> bool {
+    matches!(action_support(action), ActionSupport::Omitted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -694,13 +700,19 @@ pub fn record_action<C: Into<ActionContext>>(
     match action {
         "navigate" => {
             if let Some(url) = cmd.get("url").and_then(Value::as_str) {
-                if state.page_url(&sc.target) != Some(url) {
+                // An equal URL is only a reason to skip the step when the flow
+                // itself put the page there. After an unrecorded move, the
+                // artifact still needs the navigation.
+                if state.page_url(&sc.target) != Some(url)
+                    || state.page_url_is_unrecorded(&sc.target)
+                {
                     steps.push(Step::ScopedNavigation {
                         kind: NavigationKind::Goto,
                         url: url.to_string(),
                         scope: sc.clone(),
                     });
                     state.update_page_url(&sc.target, url);
+                    state.clear_unrecorded_page_url(&sc.target);
                 }
             }
         }
@@ -713,13 +725,16 @@ pub fn record_action<C: Into<ActionContext>>(
                 .and_then(Value::as_str)
                 .filter(|url| !url.is_empty())
             {
-                if state.page_url(&sc.target) != Some(url) {
+                if state.page_url(&sc.target) != Some(url)
+                    || state.page_url_is_unrecorded(&sc.target)
+                {
                     steps.push(Step::ScopedNavigation {
                         kind: NavigationKind::Goto,
                         url: url.to_string(),
                         scope: sc.clone(),
                     });
                     state.update_page_url(&sc.target, url);
+                    state.clear_unrecorded_page_url(&sc.target);
                 }
             }
         }

@@ -12,10 +12,10 @@ pub use playwright::{render_playwright_with_report, FormatIssue};
 pub use probe::ElementCapture;
 #[allow(unused_imports)]
 pub use steps::{
-    action_breaks_navigation_attribution, action_can_navigate, attach_navigation, bind_popup,
-    can_assert_navigation, can_open_popup, enrich_recent_steps, has_frame_scope, mark_popup,
-    record_action, set_frame_scope, step_scope, ActionContext, ClickKind, NavigationKind,
-    PointerKind, Scope, SelectorKind, Step, Target,
+    action_breaks_navigation_attribution, action_can_navigate, action_is_omitted,
+    attach_navigation, bind_popup, can_assert_navigation, can_open_popup, enrich_recent_steps,
+    has_frame_scope, mark_popup, record_action, set_frame_scope, step_scope, ActionContext,
+    ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target,
 };
 
 use serde::{Deserialize, Serialize};
@@ -283,6 +283,9 @@ pub struct CodegenState {
     sessions: HashMap<String, String>,
     pending_navigation: HashMap<String, PendingStep>,
     pending_popup: HashMap<String, PendingStep>,
+    /// Pages with a detached page-side call in flight. This is runtime state: a
+    /// daemon restart cannot resume the call, so the journal does not carry it.
+    awaiting_page_effect: HashSet<String>,
     main_frames: HashMap<String, String>,
 }
 
@@ -316,6 +319,7 @@ impl CodegenState {
             sessions: HashMap::new(),
             pending_navigation: HashMap::new(),
             pending_popup: HashMap::new(),
+            awaiting_page_effect: HashSet::new(),
             main_frames: HashMap::new(),
         }
     }
@@ -344,6 +348,7 @@ impl CodegenState {
             popup_attributed: !self.initial_state_captured,
             url: page.url.clone(),
             closed: false,
+            url_unrecorded: false,
         });
         page_id
     }
@@ -517,6 +522,7 @@ impl CodegenState {
         }
         self.pending_navigation.remove(page_id);
         self.pending_popup.remove(page_id);
+        self.awaiting_page_effect.remove(page_id);
     }
 
     /// Drop the pending navigation and popup steps for a page. A command that
@@ -536,6 +542,47 @@ impl CodegenState {
             || page_id == "p1"
         {
             self.last_url = Some(url.to_string());
+        }
+    }
+
+    /// A command that codegen cannot express moved a page. Keep the true URL,
+    /// mark that no step reaches it, and warn. The warning names the action and
+    /// the page only, so it cannot leak a captured value.
+    pub fn observe_unrecorded_navigation(&mut self, page_id: &str, url: &str, action: &str) {
+        self.update_page_url(page_id, url);
+        self.mark_unrecorded_page_url(page_id, action);
+    }
+
+    fn mark_unrecorded_page_url(&mut self, page_id: &str, action: &str) {
+        if let Some(page) = self.pages.iter_mut().find(|page| page.page_id == page_id) {
+            page.url_unrecorded = true;
+        }
+        self.capture_warning(
+            "unrecorded-navigation",
+            &format!(
+                "`{action}` moved page {page_id}. Codegen cannot record that command, so the flow has no step that reaches the new page."
+            ),
+            None,
+        );
+    }
+
+    /// A detached `webmcp invoke` returns before the page tool runs, so the
+    /// post-action URL check sees nothing. Mark the page, and treat the next
+    /// URL change that no recorded step explains as unrecorded.
+    pub fn expect_unattributed_page_effect(&mut self, page_id: &str) {
+        self.awaiting_page_effect.insert(page_id.to_string());
+    }
+
+    pub fn page_url_is_unrecorded(&self, page_id: &str) -> bool {
+        self.pages
+            .iter()
+            .find(|page| page.page_id == page_id)
+            .is_some_and(|page| page.url_unrecorded)
+    }
+
+    pub fn clear_unrecorded_page_url(&mut self, page_id: &str) {
+        if let Some(page) = self.pages.iter_mut().find(|page| page.page_id == page_id) {
+            page.url_unrecorded = false;
         }
     }
 
@@ -597,6 +644,9 @@ impl CodegenState {
     pub fn observe_navigation(&mut self, page_id: &str, url: &str) -> bool {
         self.update_page_url(page_id, url);
         let Some(pending) = self.pending_navigation.get(page_id).cloned() else {
+            if self.awaiting_page_effect.remove(page_id) {
+                self.mark_unrecorded_page_url(page_id, "webmcp invoke --detach");
+            }
             return false;
         };
         if let Some(step) = self.steps.get_mut(pending.step_index) {
@@ -1544,6 +1594,7 @@ mod tests {
                 popup_attributed: true,
                 url: "https://example.com/start".to_string(),
                 closed: false,
+                url_unrecorded: false,
             },
             sidecar::PersistedPage {
                 page_id: "p2".to_string(),
@@ -1552,6 +1603,7 @@ mod tests {
                 popup_attributed: true,
                 url: "https://example.com/other".to_string(),
                 closed: false,
+                url_unrecorded: false,
             },
         ];
         let rendered = render_recorder("hostile \"flow\"\nname", &steps, &pages);
@@ -1872,5 +1924,190 @@ mod tests {
             Some(Step::Press { asserted_url: Some(url), .. })
                 if url == "https://example.com/next#done"
         ));
+    }
+
+    #[test]
+    fn an_unrecorded_page_move_warns_and_forces_the_next_navigate() {
+        assert!(steps::action_is_omitted("webmcp_invoke"));
+        assert!(!steps::action_is_omitted("webmcp_list"));
+        assert!(!steps::action_is_omitted("webmcp_result"));
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        state.viewport_emitted = true;
+        state.sync_runtime_pages(
+            &[page(
+                1,
+                "target-a",
+                "session-a",
+                "https://example.com/start",
+            )],
+            Some("target-a"),
+            false,
+        );
+
+        state.observe_unrecorded_navigation("p1", "https://example.com/moved", "webmcp_invoke");
+        assert!(state.page_url_is_unrecorded("p1"));
+        assert_eq!(state.page_url("p1"), Some("https://example.com/moved"));
+
+        let warning = state
+            .capture_errors
+            .iter()
+            .find(|warning| warning.starts_with("unrecorded-navigation:"))
+            .expect("the move should warn");
+        assert!(
+            !warning.contains("https://example.com/moved"),
+            "the warning must not carry the URL: {warning}"
+        );
+
+        // The flow has no step that reaches the page, so an equal URL is not a
+        // reason to drop the navigate.
+        record_action(
+            "navigate",
+            &json!({ "url": "https://example.com/moved" }),
+            &json!({}),
+            &crate::native::element::RefMap::new(),
+            None,
+            Scope {
+                target: "p1".to_string(),
+                frame: Vec::new(),
+            },
+            None,
+            &mut state,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.steps.last(),
+            Some(Step::ScopedNavigation { url, .. }) if url == "https://example.com/moved"
+        ));
+        assert!(!state.page_url_is_unrecorded("p1"));
+    }
+
+    #[test]
+    fn history_commands_do_not_clear_an_unrecorded_page_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        state.viewport_emitted = true;
+        state.sync_runtime_pages(
+            &[page(
+                1,
+                "target-a",
+                "session-a",
+                "https://example.com/start",
+            )],
+            Some("target-a"),
+            false,
+        );
+        state.observe_unrecorded_navigation("p1", "https://example.com/moved", "evaluate");
+
+        for action in ["back", "forward", "reload"] {
+            record_action(
+                action,
+                &json!({}),
+                &json!({ "url": "https://example.com/moved" }),
+                &crate::native::element::RefMap::new(),
+                None,
+                Scope {
+                    target: "p1".to_string(),
+                    frame: Vec::new(),
+                },
+                None,
+                &mut state,
+            )
+            .unwrap();
+            assert!(
+                state.page_url_is_unrecorded("p1"),
+                "{action} must not prove that the flow reached the page"
+            );
+        }
+    }
+
+    #[test]
+    fn a_detached_page_call_marks_the_next_unattributed_move() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = restored_state(&directory);
+        state.sync_runtime_pages(
+            &[page(
+                1,
+                "target-a",
+                "session-a",
+                "https://example.com/start",
+            )],
+            Some("target-a"),
+            false,
+        );
+
+        // Without the mark, an unattributed URL change is ordinary page motion.
+        state.observe_navigation("p1", "https://example.com/one");
+        assert!(!state.page_url_is_unrecorded("p1"));
+
+        state.expect_unattributed_page_effect("p1");
+        state.observe_navigation("p1", "https://example.com/two");
+        assert!(state.page_url_is_unrecorded("p1"));
+        assert_eq!(
+            state
+                .capture_errors
+                .iter()
+                .filter(|warning| warning.starts_with("unrecorded-navigation:"))
+                .count(),
+            1,
+            "the mark is consumed once"
+        );
+    }
+
+    #[test]
+    fn a_journal_without_the_unrecorded_field_recovers_as_recorded() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        std::fs::write(&path, "").unwrap();
+        sidecar::append(
+            &path,
+            1,
+            &sidecar::JournalRecord::Start {
+                title: "flow".to_string(),
+                last_url: None,
+            },
+        )
+        .unwrap();
+        // An older development journal has no `urlUnrecorded` field.
+        let record = sidecar::JournalRecord::Pages(sidecar::PersistedPageState {
+            pages: vec![sidecar::PersistedPage {
+                page_id: "p1".to_string(),
+                target_id: Some("target-a".to_string()),
+                opener_target_id: None,
+                popup_attributed: true,
+                url: "https://example.com/start".to_string(),
+                closed: false,
+                url_unrecorded: true,
+            }],
+            next_page_id: 2,
+            start_page_id: Some("p1".to_string()),
+            last_active_page_id: Some("p1".to_string()),
+            initial_state_captured: true,
+        });
+        let mut envelope = serde_json::to_value(sidecar::JournalEnvelope {
+            version: 1,
+            sequence: 2,
+            record,
+        })
+        .unwrap();
+        assert!(envelope["data"]["pages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("urlUnrecorded")
+            .is_some());
+        let mut line = serde_json::to_string(&envelope).unwrap();
+        line.push('\n');
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+
+        let state = CodegenState::from_recovered(path.clone(), sidecar::recover(&path).unwrap());
+        assert_eq!(state.page_url("p1"), Some("https://example.com/start"));
+        assert!(!state.page_url_is_unrecorded("p1"));
     }
 }

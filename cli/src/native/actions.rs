@@ -3078,6 +3078,32 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     let element_capture = result.as_mut().ok().and_then(codegen::take_private_capture);
 
+    // A command that codegen cannot express can still move the page. Check the
+    // URL on both result arms, because the move can happen before the command
+    // fails.
+    if state.codegen.is_active() && codegen::action_is_omitted(action) {
+        if let (Some(browser), Some(page)) = (state.browser.as_ref(), pre_action_page.as_ref()) {
+            if let Ok(url) = codegen::probe::probe_url(&browser.client, &page.session_id).await {
+                if url != page.url {
+                    state
+                        .codegen
+                        .observe_unrecorded_navigation(&page.page_id, &url, action);
+                }
+            }
+        }
+
+        // A detached invocation returns before the page tool runs, so the check
+        // above cannot see its effect yet.
+        if action == "webmcp_invoke"
+            && result.is_ok()
+            && cmd.get("detach").and_then(Value::as_bool).unwrap_or(false)
+        {
+            if let Some(page) = pre_action_page.as_ref() {
+                state.codegen.expect_unattributed_page_effect(&page.page_id);
+            }
+        }
+    }
+
     if let Ok(ref data) = result {
         if state.codegen.is_active() {
             let capture_start = state.codegen.steps.len();

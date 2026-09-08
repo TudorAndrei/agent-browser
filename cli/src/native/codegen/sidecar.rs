@@ -37,6 +37,11 @@ pub struct PersistedPage {
     pub popup_attributed: bool,
     pub url: String,
     pub closed: bool,
+    /// A command that codegen cannot express moved this page. The flow does not
+    /// contain a step that reaches the current URL, so the next explicit
+    /// navigate must emit a step even when the URL looks unchanged.
+    #[serde(default)]
+    pub url_unrecorded: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -587,6 +592,7 @@ mod tests {
                     popup_attributed: true,
                     url: "https://example.com".to_string(),
                     closed: false,
+                    url_unrecorded: false,
                 }],
                 next_page_id: 2,
                 start_page_id: Some("p1".to_string()),

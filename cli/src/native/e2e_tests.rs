@@ -1342,6 +1342,109 @@ async fn e2e_codegen_records_the_page_move_made_by_record_start() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// A command that codegen cannot express can still move the page. `evaluate`
+/// is the same omitted class as `webmcp invoke`. The move must warn, and the
+/// navigate that follows must stay in the flow even though the URL matches.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_warns_and_keeps_the_navigate_after_an_unrecorded_move() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-unrecorded-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-unrecorded");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "unrecorded" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": "about:blank" }),
+            &mut state,
+        )
+        .await,
+    );
+    // Page script moves the page. Codegen cannot express `evaluate`.
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "4",
+                "action": "evaluate",
+                "script": "location.href = 'about:blank#moved'",
+            }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let status = execute_command(
+        &json!({ "id": "5", "action": "codegen_status" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&status);
+    assert!(
+        state
+            .codegen
+            .capture_errors
+            .iter()
+            .any(|warning| warning.starts_with("unrecorded-navigation:")),
+        "the unrecorded move should warn: {:?}",
+        state.codegen.capture_errors
+    );
+
+    // The flow never reached the moved page, so this navigate must stay even
+    // though the browser is already on that URL.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "navigate", "url": "about:blank#moved" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "7", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let steps = get_data(&stop)["flow"]["steps"]
+        .as_array()
+        .expect("the flow should have steps")
+        .clone();
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| step["type"] == "navigate" && step["url"] == "about:blank#moved")
+            .count(),
+        1,
+        "the navigate after the unrecorded move must stay: {steps:?}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_codegen_preserves_enter_navigation_and_initial_url() {
