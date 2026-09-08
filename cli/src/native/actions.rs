@@ -3208,7 +3208,24 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                             &page.session_id,
                         )
                         .await;
-                        if let Some(frame_id) = state.active_frame_id.as_deref() {
+                        // A snapshot ref carries the frame it was captured in.
+                        // An assertion on a ref inside an iframe checks that
+                        // iframe, even while the main frame is selected, so the
+                        // active frame is the wrong scope for it.
+                        let referenced =
+                            selector
+                                .and_then(super::element::parse_ref)
+                                .map(|reference| {
+                                    state
+                                        .ref_map
+                                        .get(&reference)
+                                        .and_then(|entry| entry.frame_id.clone())
+                                });
+                        let frame_id = match referenced {
+                            Some(frame_id) => frame_id,
+                            None => state.active_frame_id.clone(),
+                        };
+                        if let Some(frame_id) = frame_id.as_deref() {
                             if let Ok(frame) = codegen::probe::frame_index_path(
                                 &client,
                                 &page.session_id,

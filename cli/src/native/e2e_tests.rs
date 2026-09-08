@@ -1534,6 +1534,84 @@ async fn e2e_codegen_keeps_a_navigation_url_off_an_earlier_click() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// A snapshot ref carries its own frame. An assertion on a ref inside an iframe
+/// checked that iframe element, but recorded a step scoped to the main page.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_keeps_the_iframe_scope_of_an_assertion() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-assertframe-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-assertframe");
+    let (port, server) = start_a11y_frame_server().await;
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/codegen-outer") }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let inside = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .find(|(_, entry)| entry.name == "Inside")
+        .map(|(reference, _)| format!("@{reference}"))
+        .expect("the button inside the iframe should have a snapshot ref");
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "codegen_start", "title": "assertframe" }),
+            &mut state,
+        )
+        .await,
+    );
+    // The main frame is active, and the ref lives inside the iframe.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "isvisible", "selector": inside }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let scope = match state.codegen.steps.last() {
+        Some(super::codegen::Step::WaitForElement { scope, .. }) => scope.clone(),
+        other => panic!("the assertion should be recorded: {other:?}"),
+    };
+    assert!(
+        !scope.frame.is_empty(),
+        "the assertion checked an element inside an iframe, so the step must keep that frame: {scope:?}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server.abort();
+}
+
 /// The Recorder runner finds the target page by its current URL before it runs
 /// a step. A popup that navigates after it opens must therefore keep the URL it
 /// had when the action ran, not the URL it ended on.
