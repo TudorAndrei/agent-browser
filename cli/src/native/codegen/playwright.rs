@@ -457,6 +457,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 x,
                 y,
                 scope,
+                ..
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
                 if let Some(target) = target {
@@ -700,6 +701,7 @@ mod tests {
                 })),
                 x: 3.0,
                 y: 9.0,
+                position: None,
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),

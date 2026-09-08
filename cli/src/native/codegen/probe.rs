@@ -22,6 +22,15 @@ pub struct ElementCapture {
     pub frame_probe_failed: bool,
     pub position: Option<(f64, f64)>,
     pub scroll_delta: Option<(f64, f64)>,
+    /// Absolute scroll position after a scroll command. Recorder replays a
+    /// scroll as a position, not as a delta.
+    #[serde(default)]
+    pub scroll_position: Option<(f64, f64)>,
+    /// Whether a check or uncheck command actually changed the control. A
+    /// command that changed nothing must not become a Recorder click, because
+    /// replay would then clear the control.
+    #[serde(default)]
+    pub state_changed: Option<bool>,
 }
 
 const ELEMENT_PROBE: &str = r#"function() {
@@ -144,6 +153,8 @@ pub async fn capture_resolved_element(
         frame: frame.and_then(Result::ok),
         position: None,
         scroll_delta: None,
+        scroll_position: None,
+        state_changed: None,
     }
 }
 

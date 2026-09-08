@@ -1534,6 +1534,110 @@ async fn e2e_codegen_keeps_a_navigation_url_off_an_earlier_click() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// Recorder replays a scroll as an absolute position and a check as a click.
+/// Capture must therefore report where the page actually landed, and whether a
+/// check command changed anything.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_records_absolute_scroll_and_checkbox_intent() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-scroll-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-scroll");
+
+    let page = "data:text/html,<body style='height:5000px'>\
+<input id=agree type=checkbox checked><div style='height:4000px'></div></body>";
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "scroll" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": page }),
+            &mut state,
+        )
+        .await,
+    );
+    for id in ["4", "5"] {
+        assert_success(
+            &execute_command(
+                &json!({ "id": id, "action": "scroll", "y": 300 }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    // Back up, and then past the top of the page.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "scroll", "y": -1000 }),
+            &mut state,
+        )
+        .await,
+    );
+    // The box is already checked, so this command changes nothing.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "7", "action": "check", "selector": "#agree" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "8", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let steps = get_data(&stop)["flow"]["steps"]
+        .as_array()
+        .expect("the flow should have steps")
+        .clone();
+    let scrolls = steps
+        .iter()
+        .filter(|step| step["type"] == "scroll")
+        .map(|step| step["y"].as_f64().expect("a scroll has a position"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        scrolls,
+        vec![300.0, 600.0, 0.0],
+        "Recorder needs the position the page reached: {steps:?}"
+    );
+    let check = steps
+        .iter()
+        .find(|step| step["type"] == "waitForElement")
+        .expect("a check that changed nothing becomes an assertion");
+    assert_eq!(check["properties"]["checked"], true);
+    assert!(
+        !steps.iter().any(|step| step["type"] == "click"),
+        "a check that changed nothing must not become a click: {steps:?}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 /// A snapshot ref carries its own frame. An assertion on a ref inside an iframe
 /// checked that iframe element, but recorded a step scoped to the main page.
 #[tokio::test]

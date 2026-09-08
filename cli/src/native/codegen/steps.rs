@@ -237,6 +237,11 @@ pub enum Step {
         target: Option<Target>,
         x: f64,
         y: f64,
+        /// Absolute scroll position after the command. Recorder replays a
+        /// scroll as an absolute position, so a delta would make repeated
+        /// scrolls end in the wrong place. `None` means an older journal.
+        #[serde(default)]
+        position: Option<(f64, f64)>,
         scope: Scope,
     },
     Upload {
@@ -457,8 +462,12 @@ impl Step {
                 target,
                 x,
                 y,
+                position,
                 scope,
             } => {
+                // Recorder scrolls to an absolute position. Two scrolls of 300
+                // pixels must end at 600, not at 300.
+                let (x, y) = position.unwrap_or((*x, *y));
                 let mut value = json!({ "type": "scroll", "x": x, "y": y });
                 if let Some(target) = target {
                     value["selectors"] = json!(target.recorder_selectors());
@@ -802,30 +811,51 @@ pub fn record_action<C: Into<ActionContext>>(
                     "tap" => ClickKind::Tap,
                     _ => ClickKind::Click,
                 };
-                steps.push(Step::Pointer {
-                    target,
-                    kind,
-                    pointer: if action == "tap" {
-                        PointerKind::Touch
-                    } else {
-                        PointerKind::Mouse
-                    },
-                    button: cmd
-                        .get("button")
-                        .and_then(Value::as_str)
-                        .unwrap_or("left")
-                        .to_string(),
-                    count: if action == "dblclick" {
-                        2
-                    } else {
-                        cmd.get("clickCount").and_then(Value::as_u64).unwrap_or(1) as u8
-                    },
-                    position: capture.and_then(|capture| capture.position),
-                    opens_popup: false,
-                    popup_page: None,
-                    scope: sc.clone(),
-                    asserted_url: None,
-                });
+                // A check or uncheck that changed nothing is not a click.
+                // Recorder would replay a click and clear the control, so
+                // record what the command guaranteed: the requested state.
+                let already_in_state = matches!(kind, ClickKind::Check | ClickKind::Uncheck)
+                    && capture.and_then(|capture| capture.state_changed) == Some(false);
+                if already_in_state {
+                    let mut properties = Map::new();
+                    properties.insert(
+                        "checked".to_string(),
+                        json!(matches!(kind, ClickKind::Check)),
+                    );
+                    steps.push(Step::WaitForElement {
+                        target,
+                        scope: sc.clone(),
+                        visible: None,
+                        properties,
+                        count: None,
+                        operator: None,
+                    });
+                } else {
+                    steps.push(Step::Pointer {
+                        target,
+                        kind,
+                        pointer: if action == "tap" {
+                            PointerKind::Touch
+                        } else {
+                            PointerKind::Mouse
+                        },
+                        button: cmd
+                            .get("button")
+                            .and_then(Value::as_str)
+                            .unwrap_or("left")
+                            .to_string(),
+                        count: if action == "dblclick" {
+                            2
+                        } else {
+                            cmd.get("clickCount").and_then(Value::as_u64).unwrap_or(1) as u8
+                        },
+                        position: capture.and_then(|capture| capture.position),
+                        opens_popup: false,
+                        popup_page: None,
+                        scope: sc.clone(),
+                        asserted_url: None,
+                    });
+                }
             } else {
                 omission = Some("The action target did not have a safe selector.");
             }
@@ -926,6 +956,7 @@ pub fn record_action<C: Into<ActionContext>>(
         }
         "scroll" => steps.push(Step::Wheel {
             target: target(cmd, refs, capture),
+            position: capture.and_then(|capture| capture.scroll_position),
             x: capture
                 .and_then(|capture| capture.scroll_delta)
                 .map(|(x, _)| x)
@@ -2115,6 +2146,96 @@ mod tests {
             step,
             Step::Pointer { asserted_url: Some(url), .. } if url == "https://example.com/next"
         )));
+    }
+
+    #[test]
+    fn recorder_scrolls_to_the_absolute_position_the_browser_reached() {
+        let (_directory, mut state) = active_state();
+        state.viewport_emitted = true;
+        for position in [(0.0, 300.0), (0.0, 600.0)] {
+            record_action(
+                "scroll",
+                &json!({ "y": 300 }),
+                &json!({}),
+                &RefMap::new(),
+                None,
+                Scope::default(),
+                Some(&probe::ElementCapture {
+                    scroll_delta: Some((0.0, 300.0)),
+                    scroll_position: Some(position),
+                    ..probe::ElementCapture::default()
+                }),
+                &mut state,
+            )
+            .unwrap();
+        }
+
+        // Recorder replays a position, so two scrolls of 300 end at 600.
+        let recorder = state
+            .steps
+            .iter()
+            .map(Step::to_recorder_json)
+            .collect::<Vec<_>>();
+        assert_eq!(recorder[0]["y"], 300.0);
+        assert_eq!(recorder[1]["y"], 600.0);
+
+        // Playwright keeps the delta of each command.
+        assert!(state.steps.iter().all(|step| matches!(
+            step,
+            Step::Wheel { y, .. } if *y == 300.0
+        )));
+    }
+
+    #[test]
+    fn a_check_that_changed_nothing_becomes_an_assertion() {
+        let capture = |changed: bool| probe::ElementCapture {
+            probe: Some(probe::Probe {
+                selector: Some("#agree".to_string()),
+                test_id: None,
+                href: None,
+                input_type: None,
+            }),
+            state_changed: Some(changed),
+            ..probe::ElementCapture::default()
+        };
+
+        // The control was already checked, so the command clicked nothing.
+        // A Recorder click would clear it.
+        let (_directory, mut state) = active_state();
+        state.viewport_emitted = true;
+        record_action(
+            "check",
+            &json!({ "selector": "#agree" }),
+            &json!({}),
+            &RefMap::new(),
+            None,
+            Scope::default(),
+            Some(&capture(false)),
+            &mut state,
+        )
+        .unwrap();
+        let recorder = state.steps.last().unwrap().to_recorder_json();
+        assert_eq!(recorder["type"], "waitForElement");
+        assert_eq!(recorder["properties"]["checked"], true);
+
+        // A command that did change the control stays a click.
+        let (_directory, mut changed) = active_state();
+        changed.viewport_emitted = true;
+        record_action(
+            "check",
+            &json!({ "selector": "#agree" }),
+            &json!({}),
+            &RefMap::new(),
+            None,
+            Scope::default(),
+            Some(&capture(true)),
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(
+            changed.steps.last().unwrap().to_recorder_json()["type"],
+            "click"
+        );
     }
 
     #[test]

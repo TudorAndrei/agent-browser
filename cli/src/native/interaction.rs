@@ -498,6 +498,12 @@ pub async fn press_key_with_modifiers(
     Ok(())
 }
 
+/// Read the `[x, y]` pair that the scroll expression returned.
+fn scroll_position(result: &Value) -> Option<(f64, f64)> {
+    let value = result.get("result")?.get("value")?.as_array()?;
+    Some((value.first()?.as_f64()?, value.get(1)?.as_f64()?))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn scroll_with_capture(
     client: &CdpClient,
@@ -510,13 +516,19 @@ pub async fn scroll_with_capture(
     capture: bool,
 ) -> Result<Option<ElementCapture>, String> {
     let mut captured = None;
+    let position;
     if let Some(sel) = selector_or_ref {
         let resolved = resolve_element(client, session_id, ref_map, sel, iframe_sessions).await?;
         if capture {
             captured = Some(capture_resolved_element(client, session_id, &resolved).await);
         }
-        let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
-        client
+        // Return the position the browser actually reached. The browser can
+        // limit the movement, so adding the deltas would be a guess, and this
+        // costs no extra round trip.
+        let js =
+            "function(dx, dy) { this.scrollBy(dx, dy); return [this.scrollLeft, this.scrollTop]; }"
+                .to_string();
+        let result = client
             .send_command_typed::<_, Value>(
                 "Runtime.callFunctionOn",
                 &CallFunctionOnParams {
@@ -538,9 +550,12 @@ pub async fn scroll_with_capture(
                 Some(&resolved.session_id),
             )
             .await?;
+        position = scroll_position(&result);
     } else {
-        let js = format!("window.scrollBy({}, {})", delta_x, delta_y);
-        client
+        let js = format!(
+            "(() => {{ window.scrollBy({delta_x}, {delta_y}); return [window.scrollX, window.scrollY]; }})()"
+        );
+        let result = client
             .send_command_typed::<_, Value>(
                 "Runtime.evaluate",
                 &EvaluateParams {
@@ -551,12 +566,14 @@ pub async fn scroll_with_capture(
                 Some(session_id),
             )
             .await?;
+        position = scroll_position(&result);
     }
     if capture && captured.is_none() {
         captured = Some(ElementCapture::default());
     }
     if let Some(captured) = captured.as_mut() {
         captured.scroll_delta = Some((delta_x, delta_y));
+        captured.scroll_position = position;
     }
     Ok(captured)
 }
@@ -818,14 +835,16 @@ pub async fn set_checked_with_capture(
                         const input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
                         return input ? input.checked : false;
                     };
+                    let changed = false;
                     if (checked(this) !== wanted) {
                         const tag = this.tagName && this.tagName.toUpperCase();
                         const label = tag === 'LABEL' ? this : (this.closest && this.closest('label'));
                         const nested = this.querySelector && this.querySelector('input[type="checkbox"], input[type="radio"]');
                         const target = tag === 'INPUT' ? this : (label && label.control) || nested || this;
                         target.click();
+                        changed = true;
                     }
-                    return checked(this);
+                    return [changed, checked(this)];
                 }"#
                 .to_string(),
                 object_id: Some(resolved.object_id),
@@ -839,9 +858,15 @@ pub async fn set_checked_with_capture(
             Some(&resolved.session_id),
         )
         .await?;
-    let actual = result
-        .result
-        .value
+    let outcome = result.result.value;
+    let values = outcome.as_ref().and_then(|value| value.as_array());
+    let changed = values
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let actual = values
+        .and_then(|values| values.get(1))
+        .or(outcome.as_ref())
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     if actual != checked {
@@ -849,6 +874,10 @@ pub async fn set_checked_with_capture(
             "Element did not become {}",
             if checked { "checked" } else { "unchecked" }
         ));
+    }
+    let mut captured = captured;
+    if let Some(captured) = captured.as_mut() {
+        captured.state_changed = Some(changed);
     }
     Ok(captured)
 }
