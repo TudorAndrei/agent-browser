@@ -54,7 +54,10 @@ const ELEMENT_PROBE: &str = r#"function() {
       if (unique(candidate)) return candidate;
       node = node.parentElement;
     }
-    return parts.join(' > ');
+    // The walk ended without a unique path. A shadow root, for example, is not
+    // reachable from the document. Report nothing rather than a path that
+    // resolves to another element or to nothing.
+    return null;
   })();
   return { selector, testId: usableTestId, href: location.href, type: this instanceof HTMLInputElement ? this.type : null };
 }"#;

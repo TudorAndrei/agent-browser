@@ -1090,9 +1090,22 @@ fn enrich_target(target: &mut Target, probe: &Probe, prefer_unique: bool) {
         };
         target.selectors.retain(|existing| existing != &candidate);
         if prefer_unique {
-            // The probe returns a candidate only when it matches one element.
-            // The selector the user typed can match several.
-            target.selectors.insert(0, candidate);
+            // The probe reports a CSS candidate only when it matches one
+            // element, so it belongs before the selector the user typed, which
+            // can match several. A test ID and an exact role and name came from
+            // the snapshot and are both exact and more readable, so they keep
+            // their place ahead of a positional path.
+            let position = target
+                .selectors
+                .iter()
+                .take_while(|selector| {
+                    matches!(
+                        selector,
+                        SelectorKind::TestId { .. } | SelectorKind::Role { .. }
+                    )
+                })
+                .count();
+            target.selectors.insert(position, candidate);
         } else {
             target.selectors.push(candidate);
         }
@@ -1236,13 +1249,6 @@ pub fn step_scope(step: &Step) -> Option<&Scope> {
     }
 }
 
-pub fn mark_popup(step: &mut Step) {
-    match step {
-        Step::Click { opens_popup, .. } | Step::Pointer { opens_popup, .. } => *opens_popup = true,
-        _ => {}
-    }
-}
-
 pub fn bind_popup(step: &mut Step, page_id: &str) {
     match step {
         Step::Click { opens_popup, .. } => *opens_popup = true,
@@ -1284,32 +1290,6 @@ pub fn set_frame_scope(steps: &mut [Step], frame: Vec<usize>) {
             _ => {}
         }
     }
-}
-
-pub fn has_frame_scope(steps: &[Step]) -> bool {
-    steps.iter().any(|step| match step {
-        Step::Click { scope, .. }
-        | Step::Pointer { scope, .. }
-        | Step::Hover { scope, .. }
-        | Step::Change { scope, .. }
-        | Step::Fill { scope, .. }
-        | Step::SetValue { scope, .. }
-        | Step::Type { scope, .. }
-        | Step::Select { scope, .. }
-        | Step::Press { scope, .. }
-        | Step::Wheel { scope, .. }
-        | Step::Upload { scope, .. }
-        | Step::ScopedNavigation { scope, .. }
-        | Step::ScopedViewport { scope, .. }
-        | Step::NewPage { scope, .. }
-        | Step::OpenPage { scope, .. }
-        | Step::ClosePage { scope, .. }
-        | Step::KeyDown { scope, .. }
-        | Step::KeyUp { scope, .. }
-        | Step::Scroll { scope, .. }
-        | Step::WaitForElement { scope, .. } => !scope.frame.is_empty(),
-        _ => false,
-    })
 }
 
 #[cfg(test)]
@@ -2278,6 +2258,39 @@ mod tests {
                 "{selector} must not stay first"
             );
         }
+
+        // A snapshot ref keeps its exact role and name ahead of the positional
+        // path, which is exact but unreadable.
+        let mut refs = RefMap::new();
+        refs.add_with_frame("e1".into(), Some(7), "button", "Save", None, None);
+        let (_directory, mut named) = active_state();
+        named.viewport_emitted = true;
+        record_action(
+            "click",
+            &json!({ "selector": "@e1" }),
+            &json!({}),
+            &refs,
+            None,
+            Scope::default(),
+            Some(&capture),
+            &mut named,
+        )
+        .unwrap();
+        let Some(Step::Pointer { target, .. }) = named.steps.last() else {
+            panic!("the click should be recorded");
+        };
+        assert!(
+            matches!(target.selectors.first(), Some(SelectorKind::Role { name, .. }) if name == "Save"),
+            "the exact role should stay first: {:?}",
+            target.selectors
+        );
+        assert!(
+            target.selectors.contains(&SelectorKind::Css {
+                value: "#first".to_string()
+            }),
+            "the probed selector should stay as a fallback: {:?}",
+            target.selectors
+        );
 
         // A count assertion addresses every match on purpose.
         let (_directory, mut state) = active_state();

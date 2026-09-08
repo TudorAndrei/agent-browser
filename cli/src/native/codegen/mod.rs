@@ -10,12 +10,11 @@ mod steps;
 
 pub use playwright::{render_playwright_with_report, FormatIssue};
 pub use probe::ElementCapture;
-#[allow(unused_imports)]
 pub use steps::{
     action_breaks_navigation_attribution, action_can_navigate, action_is_omitted,
     attach_navigation, bind_popup, can_assert_navigation, can_open_popup, enrich_recent_steps,
-    has_frame_scope, mark_popup, record_action, set_frame_scope, step_scope, ActionContext,
-    ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target,
+    record_action, set_frame_scope, step_scope, ActionContext, ClickKind, NavigationKind,
+    PointerKind, Scope, SelectorKind, Step, Target,
 };
 
 use serde::{Deserialize, Serialize};

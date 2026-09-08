@@ -1534,6 +1534,98 @@ async fn e2e_codegen_keeps_a_navigation_url_off_an_earlier_click() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// The probe builds a positional CSS path, but it cannot reach an element
+/// inside a shadow root from the document. It must then report no selector, so
+/// the exact role and name from the snapshot stays the target.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_keeps_the_exact_role_target_for_a_shadow_element() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-shadow-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-shadow");
+
+    let page = "data:text/html,<div id=host></div><script>\
+document.getElementById('host').attachShadow({mode:'open'})\
+.innerHTML='<button>Save</button>';</script>";
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": page }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let save = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .find(|(_, entry)| entry.name == "Save")
+        .map(|(reference, _)| format!("@{reference}"))
+        .expect("the shadow button should have a snapshot ref");
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "codegen_start", "title": "shadow" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "click", "selector": save }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "6", "action": "codegen_stop", "format": "playwright" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let output = get_data(&stop)["output"]
+        .as_str()
+        .expect("the spec should be returned")
+        .to_string();
+
+    // A positional path that the document cannot resolve would silently click
+    // the wrong element, or nothing at all.
+    assert!(
+        output.contains("getByRole(\"button\", { name: \"Save\", exact: true })"),
+        "the exact role target must survive an unresolvable probe path: {output}"
+    );
+    assert!(
+        !output.contains("nth-of-type"),
+        "an unverified positional path must not become the target: {output}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 /// Recorder replays a scroll as an absolute position and a check as a click.
 /// Capture must therefore report where the page actually landed, and whether a
 /// check command changed anything.
