@@ -119,6 +119,44 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 - [x] Confirm that no dashboard or changelog changes were added
 - [x] Commit: `docs(codegen): document durable flow generation`
 
+## Phase 6: Unrecorded page changes from upstream v0.37.0 commands
+
+- [x] Merge `upstream/main` at v0.37.0 into the branch and resolve the `actions.rs`, `output.rs`, and documentation conflicts
+- [x] Classify `webmcp_list` and `webmcp_result` as observations in `action_support`
+- [ ] Add `action_can_change_url_without_capture` in `cli/src/native/codegen/steps.rs` for `recording_start` and `webmcp_invoke`
+- [ ] Add `url_unrecorded` to `PageIdentity` in `cli/src/native/codegen/mod.rs`
+- [ ] Carry `url_unrecorded` in the page-state journal `update` record and restore it during recovery
+- [ ] Add `CodegenState::observe_unrecorded_navigation` with the `unrecorded-navigation` capture warning and no captured values
+- [ ] Call the new URL check in `cli/src/native/actions.rs` after a successful action of that class, using the pre-action page session
+- [ ] Make `record_action` emit a navigate step while `url_unrecorded` is set, and clear the flag when it emits that step
+- [ ] Report `unrecorded-navigation` in `codegen status` and in the `codegen stop` warning counts
+- [ ] Test that `recording_start` and `webmcp_invoke` set the flag and that `webmcp_list` and `webmcp_result` do not
+- [ ] Test that a later `navigate` to the same URL still emits a step while the flag is set
+- [ ] Test that the flag survives journal recovery
+- [ ] Test that the warning text contains no URL, typed value, or credential
+- [ ] Add ignored Chrome e2e tests for `record start --url` during capture and for the navigate that follows it
+- [ ] Commit: `fix(codegen): keep page URL true after unrecorded commands`
+
+## Phase 7: Upstream v0.37.0 documentation and pull-request hygiene
+
+- [ ] Add the WebMCP commands to the "not recorded" text in `docs/src/app/codegen/page.mdx`
+- [ ] Add the same text to `skill-data/core/references/codegen.md`
+- [ ] Document `record start --url` page movement and the `unrecorded-navigation` warning on both surfaces
+- [ ] Document that a new tab inherits the session setup and that a generated artifact does not contain that setup
+- [ ] Remove `PLAN.md` and `TODO.md` from the branch that becomes the upstream pull request, and keep them on the fork `main`
+- [ ] Confirm that the branch has no changelog or dashboard change
+- [ ] Commit: `docs(codegen): document unrecorded page changes`
+
+## Verification after the upstream merge
+
+- [x] `cargo test --manifest-path cli/Cargo.toml` (1330 passed, 0 failed, 130 ignored)
+- [x] `cargo fmt --manifest-path cli/Cargo.toml -- --check`
+- [x] `cargo clippy --manifest-path cli/Cargo.toml` (2 warnings remain; `git blame` shows both come from upstream code)
+- [x] `pnpm test:codegen-formats` (2 passed)
+- [ ] `pnpm --dir docs lint`
+- [ ] `pnpm --dir docs build`
+- [ ] `cargo test --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1`
+
 ## Review
 
 - [x] Code reviewed against every confirmed design decision in `PLAN.md`

@@ -10,6 +10,8 @@ The initial codegen implementation exists in commits `74f8406` and `a710ca2`, bu
 
 The post-implementation review confirmed the original 14 findings and found more gaps in action fidelity, page identity, generated source, recovery, and warning behavior. This plan replaces the old loose follow-up list. The design was confirmed with the user on 2026-08-12.
 
+Phases 1 to 5 are complete. On 2026-09-08 the branch merged upstream `main` at v0.37.0. That release changed `record start` and added experimental WebMCP commands. The change made a new capture gap, so this plan now has Phase 6 and Phase 7. The merge itself is commit `650530e`.
+
 ## Approach
 
 ### Safety contract
@@ -216,6 +218,33 @@ Journal tests cover partial final records, malformed complete records, sequence 
 
 Add command-count tests for the codegen CDP path. Measure codegen-active timing and record it as evidence without a fixed timing threshold.
 
+### Upstream v0.37.0 integration
+
+Upstream PR #1776 changed `record start`. It no longer makes a new browser context and a new page. It attaches the screencast to the active page, and `record start --url` navigates that active page.
+
+This breaks a capture assumption. Before the change, the new recording page appeared as a new CDP target, so `sync_runtime_pages` gave it a new logical page and its own URL. After the change, the tracked logical page keeps its identity but silently gets a different URL. `recording_start` is an omitted action, so `record_action` writes an omission warning, but nothing updates `PageIdentity::url`, and `action_can_navigate` does not contain `recording_start`.
+
+Two failures follow:
+
+- A later `navigate` to the same URL is dropped, because `record_action` skips a navigate step when `state.page_url(&scope.target)` is already equal to the requested URL. The flow then has no step that reaches the page.
+- Every following recorded action runs against a page that the generated artifact never opened. The artifact stays schema-valid and looks correct. The safety contract forbids this.
+
+Upstream PR #1757 added `webmcp invoke`. A page-side tool call can also navigate or change the page, so it has the same class of gap.
+
+The repair keeps the "codegen must not guess" rule. Codegen does not invent a navigation step for a command that it cannot express. It records the true URL, marks that the change was not captured, and makes the next explicit navigate on that page emit a step.
+
+Add `action_can_change_url_without_capture(action)` in `cli/src/native/codegen/steps.rs` for `recording_start` and `webmcp_invoke`. When such an action is successful and codegen is active, read the post-action URL from the pre-action page session with `probe::probe_url`. This is the same call that the navigation path already uses. Do not use `observe_navigation`, because it attaches a URL assertion to a pending recorded step. Add `CodegenState::observe_unrecorded_navigation(page_id, url)` instead. It updates the page URL, sets a new `url_unrecorded` flag on `PageIdentity`, and adds an `unrecorded-navigation` capture warning. The warning names the action and the logical page and contains no captured values.
+
+`record_action` clears `url_unrecorded` when it emits a navigate step for that page. While the flag is set, the dedupe cannot drop the step. The flag is page state, so the journal carries it in the existing page-state `update` record, and recovery restores it.
+
+Upstream PR #1777 makes a new tab inherit the session setup, which can include init scripts. A generated artifact does not contain that setup. This is a documentation matter, not a capture defect.
+
+`webmcp list` and `webmcp result` do not change the page. Commit `8724005` classifies them as observations, so they make no false omission warning. `webmcp invoke` and `webmcp cancel` stay omitted with a warning.
+
+### Fork-only files
+
+`PLAN.md` and `TODO.md` are on the branch. They are fork planning files. They must not go into the upstream pull request. The new Node CI job in `.github/workflows/ci.yml` is feature work and stays.
+
 ## Out of scope
 
 - Page-side recording of direct human interactions
@@ -289,6 +318,27 @@ Each phase must keep CLI and MCP behavior aligned and update relevant user docum
 - Confirm that no dashboard or changelog changes were added.
   **Commit:** `docs(codegen): document durable flow generation`
 
+### Phase 6: Unrecorded page changes from upstream v0.37.0 commands
+
+- Add `action_can_change_url_without_capture` in `cli/src/native/codegen/steps.rs` for `recording_start` and `webmcp_invoke`.
+- Add `url_unrecorded` to `PageIdentity` in `cli/src/native/codegen/mod.rs`, and carry it in the page-state journal `update` record and in recovery.
+- Add `CodegenState::observe_unrecorded_navigation`, which updates the page URL, sets the flag, and adds an `unrecorded-navigation` capture warning without captured values.
+- Call the new URL check in `cli/src/native/actions.rs` after a successful action of that class, using the pre-action page session.
+- Make `record_action` emit a navigate step while `url_unrecorded` is set, and clear the flag when it emits that step.
+- Report `unrecorded-navigation` in `codegen status` and `codegen stop` warning counts.
+- Add unit tests for the classifier, the flag, the dedupe behavior, the warning text, and journal recovery of the flag.
+- Add ignored Chrome e2e tests for `record start --url` during capture and for a later navigate to the same URL.
+  **Commit:** `fix(codegen): keep page URL true after unrecorded commands`
+
+### Phase 7: Upstream v0.37.0 documentation and pull-request hygiene
+
+- Add the WebMCP commands to the "not recorded" text in `docs/src/app/codegen/page.mdx` and `skill-data/core/references/codegen.md`.
+- Document that `record start --url` can move the active page, that codegen warns with `unrecorded-navigation`, and that `record` and `codegen` are still different features.
+- Document that a new tab inherits the session setup, and that a generated artifact does not contain that setup.
+- Remove `PLAN.md` and `TODO.md` from the branch that becomes the upstream pull request. Keep them on the fork `main`.
+- Confirm that the branch has no changelog or dashboard change.
+  **Commit:** `docs(codegen): document unrecorded page changes`
+
 ## Required verification
 
 - `cargo test --manifest-path cli/Cargo.toml`
@@ -311,7 +361,13 @@ Dashboard checks are not required because the dashboard has no codegen surface.
 - Use four CDP round trips per recorded step as the conservative maximum for the active capture hook. Inactive codegen adds no capture calls.
 - Frame index parity between CDP and Playwright must be proved with real browser fixtures. Unproved cases are omitted with warnings.
 - Keeping degraded capture in memory permits useful stop output but cannot make unjournaled actions recoverable after daemon loss.
+- The `url_unrecorded` flag keeps the flow honest, but it cannot rebuild the missing navigation. A flow that uses `record start --url` or `webmcp invoke` and then never navigates again still needs the warning to tell the user that the artifact is incomplete.
+- The URL check adds one CDP round trip after `record start` and `webmcp invoke` while codegen is active. This stays inside the agreed maximum of four round trips per recorded step.
 
 ## Open questions
 
-None. The user confirmed the shared design on 2026-08-12 and confirmed the shared understanding before final verification. Implementation and verification finished on 2026-08-14.
+The design for Phases 1 to 5 was confirmed with the user on 2026-08-12. Implementation and verification finished on 2026-08-14.
+
+Phases 6 and 7 come from the upstream v0.37.0 merge on 2026-09-08. One decision is open:
+
+- Phase 6 makes `record start` and `webmcp invoke` set `url_unrecorded`. An alternative is to record the observed URL as a navigate step. This plan rejects that alternative, because codegen would then invent a step for a command that it cannot express. Confirm this choice before implementation starts.
