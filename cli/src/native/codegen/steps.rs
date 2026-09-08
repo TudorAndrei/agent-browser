@@ -54,6 +54,15 @@ impl Target {
                 // test IDs. Building CSS from the raw value here can change
                 // its meaning for quotes or other CSS syntax characters.
                 SelectorKind::TestId { .. } => None,
+                // Recorder has no way to say "the second match", so a target
+                // that needed an index cannot use an accessible name at all.
+                // It would replay on the first element with that name.
+                //
+                // The role cannot be added either: `@puppeteer/replay` escapes
+                // quotes and brackets before it wraps the value in
+                // `::-p-aria(...)`, so `aria/Save[role="button"]` becomes part
+                // of the name it searches for and matches nothing.
+                SelectorKind::Role { nth: Some(_), .. } => None,
                 SelectorKind::Role { name, .. } if !name.is_empty() => {
                     Some(vec![format!("aria/{name}")])
                 }
@@ -1105,13 +1114,16 @@ fn enrich_target(target: &mut Target, probe: &Probe, prefer_unique: bool) {
             // can match several. A test ID and an exact role and name came from
             // the snapshot and are both exact and more readable, so they keep
             // their place ahead of a positional path.
+            // A role with an index is the exception. Each tool counts its own
+            // match set, so the index that capture recorded can select a
+            // different element. The probed selector is exact, so it leads.
             let position = target
                 .selectors
                 .iter()
                 .take_while(|selector| {
                     matches!(
                         selector,
-                        SelectorKind::TestId { .. } | SelectorKind::Role { .. }
+                        SelectorKind::TestId { .. } | SelectorKind::Role { nth: None, .. }
                     )
                 })
                 .count();
@@ -2230,6 +2242,86 @@ mod tests {
         assert_eq!(
             changed.steps.last().unwrap().to_recorder_json()["type"],
             "click"
+        );
+    }
+
+    #[test]
+    fn an_indexed_role_yields_to_the_probed_selector() {
+        let mut refs = RefMap::new();
+        refs.add_with_frame("e1".into(), Some(7), "button", "Save", Some(1), None);
+        let (_directory, mut state) = active_state();
+        state.viewport_emitted = true;
+        record_action(
+            "click",
+            &json!({ "selector": "@e1" }),
+            &json!({}),
+            &refs,
+            None,
+            Scope::default(),
+            Some(&probe::ElementCapture {
+                probe: Some(probe::Probe {
+                    selector: Some("#second".to_string()),
+                    test_id: None,
+                    href: None,
+                    input_type: None,
+                }),
+                ..probe::ElementCapture::default()
+            }),
+            &mut state,
+        )
+        .unwrap();
+
+        let Some(Step::Pointer { target, .. }) = state.steps.last() else {
+            panic!("the click should be recorded");
+        };
+        // Each tool counts its own match set, so a recorded index can select a
+        // different element. The probed selector is exact.
+        assert_eq!(
+            target.selectors.first(),
+            Some(&SelectorKind::Css {
+                value: "#second".to_string()
+            }),
+            "{:?}",
+            target.selectors
+        );
+    }
+
+    #[test]
+    fn recorder_selectors_refuse_an_indexed_accessible_name() {
+        let named = Target {
+            selectors: vec![SelectorKind::Role {
+                role: "button".to_string(),
+                name: "Save".to_string(),
+                nth: None,
+            }],
+            input_type: None,
+            verified: true,
+        };
+        assert_eq!(
+            named.recorder_selectors(),
+            vec![vec!["aria/Save".to_string()]],
+            "the runner escapes a role qualifier into the name it searches for"
+        );
+
+        // Capture stored an index, and Recorder cannot express one. Offering
+        // the name alone would replay on the first `Save`.
+        let indexed = Target {
+            selectors: vec![
+                SelectorKind::Role {
+                    role: "button".to_string(),
+                    name: "Save".to_string(),
+                    nth: Some(1),
+                },
+                SelectorKind::Css {
+                    value: "#second".to_string(),
+                },
+            ],
+            input_type: None,
+            verified: true,
+        };
+        assert_eq!(
+            indexed.recorder_selectors(),
+            vec![vec!["#second".to_string()]]
         );
     }
 

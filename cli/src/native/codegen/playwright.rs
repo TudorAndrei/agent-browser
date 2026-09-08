@@ -38,11 +38,8 @@ fn single_element_target(step: &Step) -> Option<&Target> {
             count: None,
             ..
         } => Some(target),
-        Step::Scroll {
-            target: Some(target),
-            ..
-        }
-        | Step::Wheel {
+        // `Scroll` renders as `mouse.wheel`, which uses no locator at all.
+        Step::Wheel {
             target: Some(target),
             ..
         } => Some(target),
@@ -58,11 +55,11 @@ fn locator(target: &Target, page: &str, frame: &[usize], single: bool) -> Option
     for index in frame {
         root.push_str(&format!(".frameLocator('iframe, frame').nth({index})"));
     }
-    let suffix = if single && !target.verified {
-        ".first()"
-    } else {
-        ""
-    };
+    // An older journal has no `verified` flag. A leading test ID came from the
+    // probe, which reports one only when it is unique.
+    let verified = target.verified
+        || matches!(target.selectors.first(), Some(SelectorKind::TestId { value }) if !value.is_empty());
+    let suffix = if single && !verified { ".first()" } else { "" };
     target.selectors.iter().find_map(|selector| match selector {
         SelectorKind::TestId { value } if !value.is_empty() => {
             Some(format!("{root}.getByTestId({})", js(value)))
@@ -173,14 +170,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
     let mut emitted = 0usize;
     for (step_index, step) in steps.iter().enumerate() {
         let before = lines.len();
-        if single_element_target(step).is_some_and(|target| !target.verified) {
-            issues.push(FormatIssue {
-                code: "playwright-target-not-unique",
-                message: "Playwright used the first match, because the recorded selector was not verified to address one element.",
-                step_index,
-                omitted: false,
-            });
-        }
+        let unverified_target = single_element_target(step).is_some_and(|target| !target.verified);
         match step {
             Step::SetViewport { width, height, .. } => {
                 if viewport.is_none() {
@@ -552,6 +542,16 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
         }
         if lines.len() > before {
             emitted += 1;
+            // Report only for a step that reached the page. A step omitted for
+            // another reason already carries its own issue.
+            if unverified_target {
+                issues.push(FormatIssue {
+                    code: "playwright-target-not-unique",
+                    message: "Playwright used the first match, because the recorded selector was not verified to address one element.",
+                    step_index,
+                    omitted: false,
+                });
+            }
         }
     }
     lines.push("});".to_string());
