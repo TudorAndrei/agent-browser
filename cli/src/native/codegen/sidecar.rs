@@ -3,7 +3,7 @@ use crate::connection::get_socket_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const JOURNAL_VERSION: u32 = 1;
@@ -116,6 +116,10 @@ pub struct RecoveredJournal {
     pub degraded_messages: Vec<String>,
     pub warnings: Vec<String>,
     pub terminal: Option<TerminalRecord>,
+    /// Byte offset just after the last record that recovery accepted. An
+    /// unusable suffix can follow it, and the last record can lack its final
+    /// newline, so `repair` must run before the next append.
+    pub valid_bytes: u64,
 }
 
 pub fn path_for_session(session_id: &str) -> PathBuf {
@@ -213,6 +217,49 @@ pub fn append(path: &Path, sequence: u64, record: &JournalRecord) -> Result<(), 
         .map_err(|error| format!("Failed to append codegen journal record: {error}"))
 }
 
+/// Make a recovered journal safe to append to again.
+///
+/// `recover` accepts one unusable final line, but it cannot change the file.
+/// Without this repair the next append joins its record to that suffix, and
+/// every later recovery fails, including the one that `codegen stop` performs.
+/// The repair only removes bytes that recovery already refused, and it never
+/// rewrites an accepted record.
+pub fn repair(path: &Path, valid_bytes: u64) -> Result<(), String> {
+    ensure_regular_file(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("Failed to open codegen journal: {error}"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("Failed to inspect codegen journal: {error}"))?
+        .len();
+    if length > valid_bytes {
+        file.set_len(valid_bytes)
+            .map_err(|error| format!("Failed to repair codegen journal: {error}"))?;
+    }
+    if valid_bytes == 0 {
+        return Ok(());
+    }
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::Start(valid_bytes - 1))
+        .and_then(|_| file.read_exact(&mut last))
+        .map_err(|error| format!("Failed to read the codegen journal end: {error}"))?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(0))
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.flush())
+        .map_err(|error| format!("Failed to repair codegen journal: {error}"))
+}
+
 pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
     ensure_regular_file(path)?;
     let metadata = fs::metadata(path)
@@ -240,11 +287,19 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
     let mut next_warning_id = 1u64;
     let mut terminal = None;
 
+    let mut valid_bytes = 0u64;
+    let mut cursor = 0u64;
+
     for (index, line) in raw_lines.iter().enumerate() {
+        // `split` drops one newline for every element except the last, so the
+        // last element is the only one that can lack its terminator.
+        let is_last_content_line = index == raw_lines.len() - 1;
+        let record_start = cursor;
+        let record_bytes = line.len() as u64 + u64::from(!is_last_content_line);
+        cursor += record_bytes;
         if line.is_empty() {
             continue;
         }
-        let is_last_content_line = index == raw_lines.len() - 1;
         let envelope: JournalEnvelope = match serde_json::from_str(line) {
             Ok(envelope) => envelope,
             Err(_error) if is_last_content_line && !has_final_newline => break,
@@ -361,6 +416,7 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
             }
         }
         expected_sequence += 1;
+        valid_bytes = record_start + record_bytes;
     }
 
     let title = title.ok_or_else(|| "Codegen journal is missing its start record.".to_string())?;
@@ -374,6 +430,7 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
         degraded_messages,
         warnings: warnings.into_values().collect(),
         terminal,
+        valid_bytes,
     })
 }
 
@@ -633,6 +690,126 @@ mod tests {
         let recovered = recover(&path).unwrap();
 
         assert_eq!(recovered.next_sequence, 2);
+    }
+
+    fn journal_with_suffix(directory: &tempfile::TempDir, suffix: &str) -> PathBuf {
+        let path = directory.path().join("flow.codegen.jsonl");
+        let start = serde_json::to_string(&JournalEnvelope {
+            version: JOURNAL_VERSION,
+            sequence: 1,
+            record: JournalRecord::Start {
+                title: "flow".to_string(),
+                last_url: None,
+            },
+        })
+        .unwrap();
+        fs::write(&path, format!("{start}\n{suffix}")).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_repair_refuses_a_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = journal_with_suffix(&directory, "{\"version\":1");
+        let link = directory.path().join("link.codegen.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let before = fs::read_to_string(&target).unwrap();
+
+        let error = repair(&link, 0).unwrap_err();
+
+        assert!(error.contains("not a regular file"), "{error}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), before);
+    }
+
+    #[test]
+    fn a_partial_final_record_survives_the_next_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_with_suffix(&directory, "{\"version\":1");
+
+        let recovered = recover(&path).unwrap();
+        assert_eq!(recovered.next_sequence, 2);
+        repair(&path, recovered.valid_bytes).unwrap();
+        append(&path, 2, &JournalRecord::DiscardRequested).unwrap();
+
+        // Without the repair, the appended record joins the partial record and
+        // the journal becomes unreadable, including for `codegen stop`.
+        let again = recover(&path).unwrap();
+        assert_eq!(again.next_sequence, 3);
+        assert!(matches!(
+            again.terminal,
+            Some(TerminalRecord::DiscardRequested)
+        ));
+    }
+
+    #[test]
+    fn a_complete_final_record_without_a_newline_survives_the_next_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let complete = serde_json::to_string(&JournalEnvelope {
+            version: JOURNAL_VERSION,
+            sequence: 2,
+            record: JournalRecord::State { last_url: None },
+        })
+        .unwrap();
+        let path = journal_with_suffix(&directory, &complete);
+
+        let recovered = recover(&path).unwrap();
+        assert_eq!(recovered.next_sequence, 3);
+        repair(&path, recovered.valid_bytes).unwrap();
+        append(&path, 3, &JournalRecord::DiscardRequested).unwrap();
+
+        let again = recover(&path).unwrap();
+        assert_eq!(again.next_sequence, 4);
+        assert!(matches!(
+            again.terminal,
+            Some(TerminalRecord::DiscardRequested)
+        ));
+    }
+
+    #[test]
+    fn the_repair_keeps_every_valid_record_and_the_journal_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = journal_with_suffix(&directory, "{\"version\":1");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let before = fs::read_to_string(&path).unwrap();
+        let first_line = before.lines().next().unwrap().to_string();
+
+        let recovered = recover(&path).unwrap();
+        repair(&path, recovered.valid_bytes).unwrap();
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(after, format!("{first_line}\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn the_repair_leaves_a_whole_journal_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        append(&path, 1, &start()).unwrap();
+        append(&path, 2, &JournalRecord::State { last_url: None }).unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+
+        let recovered = recover(&path).unwrap();
+        repair(&path, recovered.valid_bytes).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

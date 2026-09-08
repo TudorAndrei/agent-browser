@@ -759,7 +759,19 @@ impl CodegenState {
             return state;
         }
         match sidecar::recover(&path) {
-            Ok(recovered) => Self::from_recovered(path, recovered),
+            Ok(recovered) => {
+                // Capture resumes from here, so the journal must be able to
+                // accept the next append.
+                if let Err(error) = sidecar::repair(&path, recovered.valid_bytes) {
+                    let mut state = Self::new();
+                    state.status = CodegenStatus::RecoveryError;
+                    state.sidecar_path = Some(path.clone());
+                    state.cleanup_paths = sidecar::existing_known_paths(&path);
+                    state.capture_errors.push(error);
+                    return state;
+                }
+                Self::from_recovered(path, recovered)
+            }
             Err(error) => {
                 let mut state = Self::new();
                 state.status = CodegenStatus::RecoveryError;
