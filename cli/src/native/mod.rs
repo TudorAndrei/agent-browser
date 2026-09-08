@@ -48,6 +48,8 @@ pub mod tab_binding;
 pub mod tracing;
 #[allow(dead_code)]
 pub mod webdriver;
+#[allow(dead_code)]
+pub mod webmcp;
 
 #[cfg(test)]
 mod e2e_tests;
