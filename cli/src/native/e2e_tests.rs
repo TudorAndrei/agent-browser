@@ -1306,6 +1306,8 @@ async fn e2e_codegen_records_the_page_move_made_by_record_start() {
         )
         .await,
     );
+    // ffmpeg needs at least one captured frame before the take can close.
+    tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
     assert_success(
         &execute_command(
             &json!({ "id": "6", "action": "recording_stop" }),
