@@ -123,40 +123,40 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 
 - [x] Merge `upstream/main` at v0.37.0 into the branch and resolve the `actions.rs`, `output.rs`, and documentation conflicts
 - [x] Classify `webmcp_list` and `webmcp_result` as observations in `action_support`
-- [ ] Add a `recording_start` arm to `record_action` that emits a scoped goto when `cmd["url"]` is present
-- [ ] Classify `recording_start` and `recording_stop` in `action_support` so neither makes a false `omitted-action` warning
-- [ ] Drain available events before an omitted action is dispatched, then remove `pending_navigation` and `pending_popup` for the active page
-- [ ] Test that `record start --url` emits one scoped goto and that `record start` without a URL and `record stop` emit nothing and warn nothing
-- [ ] Test that a `click` that does not navigate, followed by `record start --url`, gets no asserted URL
-- [ ] Test that a `click` that does navigate keeps its asserted URL
-- [ ] Add an ignored Chrome e2e test for capture across `record start --url`
-- [ ] Commit: `fix(codegen): record the page move made by record start`
+- [x] Add a `recording_start` arm to `record_action` that emits a scoped goto when `cmd["url"]` is present
+- [x] Classify `recording_start` and `recording_stop` in `action_support` so neither makes a false `omitted-action` warning
+- [x] Drain available events before an omitted action is dispatched, then remove `pending_navigation` and `pending_popup` for the active page
+- [x] Test that `record start --url` emits one scoped goto and that `record start` without a URL and `record stop` emit nothing and warn nothing
+- [x] Test that a `click` that does not navigate, followed by `record start --url`, gets no asserted URL
+- [x] Test that a `click` that does navigate keeps its asserted URL
+- [x] Add an ignored Chrome e2e test for capture across `record start --url`
+- [x] Commit: `fix(codegen): record the page move made by record start`
 
 ## Phase 7: Mark page changes that codegen cannot express
 
-- [ ] Add `url_unrecorded` to `sidecar::PersistedPage` with `#[serde(default)]` and to the runtime page state
-- [ ] Add `CodegenState::observe_unrecorded_navigation` with the `unrecorded-navigation` capture warning and no captured values
-- [ ] Compare the post-action URL with the `pre_action_page` URL for every omitted action, on the successful and the failed result arm
-- [ ] Treat a later unattributed URL change as unrecorded while `state.webmcp` holds a pending detached invocation for the session
-- [ ] Make the `navigate` dedupe emit a step while the flag is set, and clear the flag only on an emitted goto
-- [ ] Confirm that the `codegen status` and `codegen stop` warning counters parse the new code
-- [ ] Test that `webmcp invoke` sets the flag and that `webmcp list` and `webmcp result` do not
-- [ ] Test that a later `navigate` to the same URL still emits a step while the flag is set
-- [ ] Test that `back`, `forward`, and `reload` do not clear the flag
-- [ ] Test that the flag survives journal recovery from an old journal without the field
-- [ ] Test that the warning text contains no URL, typed value, or credential
-- [ ] Add an ignored Chrome e2e test for a `webmcp invoke` that navigates, followed by a navigate to the same URL
-- [ ] Commit: `fix(codegen): warn when a command moves a page without capture`
+- [x] Add `url_unrecorded` to `sidecar::PersistedPage` with `#[serde(default)]` and to the runtime page state
+- [x] Add `CodegenState::observe_unrecorded_navigation` with the `unrecorded-navigation` capture warning and no captured values
+- [x] Compare the post-action URL with the `pre_action_page` URL for every omitted action, on the successful and the failed result arm
+- [x] Treat a later unattributed URL change as unrecorded while `state.webmcp` holds a pending detached invocation for the session
+- [x] Make the `navigate` dedupe emit a step while the flag is set, and clear the flag only on an emitted goto
+- [x] Confirm that the `codegen status` and `codegen stop` warning counters parse the new code
+- [x] Test that `webmcp invoke` sets the flag and that `webmcp list` and `webmcp result` do not
+- [x] Test that a later `navigate` to the same URL still emits a step while the flag is set
+- [x] Test that `back`, `forward`, and `reload` do not clear the flag
+- [x] Test that the flag survives journal recovery from an old journal without the field
+- [x] Test that the warning text contains no URL, typed value, or credential
+- [x] Add an ignored Chrome e2e test for a `webmcp invoke` that navigates, followed by a navigate to the same URL
+- [x] Commit: `fix(codegen): warn when a command moves a page without capture`
 
 ## Phase 8: Upstream v0.37.0 documentation and pull-request hygiene
 
-- [ ] Add the WebMCP commands to the "not recorded" text in `docs/src/app/codegen/page.mdx`
-- [ ] Add the same text to `skill-data/core/references/codegen.md`
-- [ ] Document that `record start --url` becomes a recorded navigation, and document the `unrecorded-navigation` warning, on both surfaces
-- [ ] Document that a new tab inherits the session setup and that a generated artifact does not contain that setup
+- [x] Add the WebMCP commands to the "not recorded" text in `docs/src/app/codegen/page.mdx`
+- [x] Add the same text to `skill-data/core/references/codegen.md`
+- [x] Document that `record start --url` becomes a recorded navigation, and document the `unrecorded-navigation` warning, on both surfaces
+- [x] Document that a new tab inherits the session setup and that a generated artifact does not contain that setup
 - [ ] Remove `PLAN.md` and `TODO.md` from the branch that becomes the upstream pull request, and keep them on the fork `main`
-- [ ] Confirm that the branch has no changelog or dashboard change
-- [ ] Commit: `docs(codegen): document unrecorded page changes`
+- [x] Confirm that the branch has no changelog or dashboard change
+- [x] Commit: `docs(codegen): document unrecorded page changes`
 
 ## Verification after the upstream merge
 
@@ -164,8 +164,8 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 - [x] `cargo fmt --manifest-path cli/Cargo.toml -- --check`
 - [x] `cargo clippy --manifest-path cli/Cargo.toml` (2 warnings remain; `git blame` shows both come from upstream code)
 - [x] `pnpm test:codegen-formats` (2 passed)
-- [ ] `pnpm --dir docs lint`
-- [ ] `pnpm --dir docs build`
+- [x] `pnpm --dir docs lint`
+- [x] `pnpm --dir docs build`
 - [ ] `cargo test --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1`
 
 ## Review
