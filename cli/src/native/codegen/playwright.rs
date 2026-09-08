@@ -30,7 +30,14 @@ fn locator(target: &Target, page: &str, frame: &[usize]) -> Option<String> {
             Some(format!("{root}.getByTestId({})", js(value)))
         }
         SelectorKind::Role { role, name, nth } if !role.is_empty() && !name.is_empty() => {
-            let mut result = format!("{root}.getByRole({}, {{ name: {} }})", js(role), js(name));
+            // Capture resolved the ref by exact role and name. Partial matching
+            // would let `Save` match `Save draft`, and it would also change
+            // what a stored `nth` counts.
+            let mut result = format!(
+                "{root}.getByRole({}, {{ name: {}, exact: true }})",
+                js(role),
+                js(name)
+            );
             if let Some(nth) = nth {
                 result.push_str(&format!(".nth({nth})"));
             }
@@ -118,6 +125,11 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
     ]);
 
     let mut pages = HashMap::from([("p1".to_string(), "page".to_string())]);
+    // `test.use` already puts the main page at the initial viewport.
+    let mut current_viewport = HashMap::new();
+    if let Some(size) = viewport {
+        current_viewport.insert("p1".to_string(), size);
+    }
     let mut issues = Vec::new();
     let mut emitted = 0usize;
     for (step_index, step) in steps.iter().enumerate() {
@@ -273,9 +285,16 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 scope,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                if (scope.target == "main" || scope.target == "p1")
-                    && viewport == Some((*width, *height, *device_scale_factor, *is_mobile))
-                {
+                // Skip a step that changes nothing for this page. Comparing
+                // with the initial viewport instead would drop a resize back to
+                // the size the recording started at.
+                let key = if scope.target == "main" {
+                    "p1".to_string()
+                } else {
+                    scope.target.clone()
+                };
+                let size = (*width, *height, *device_scale_factor, *is_mobile);
+                if current_viewport.get(&key) == Some(&size) {
                     continue;
                 }
                 if viewport.is_some_and(|(_, _, scale, mobile)| {
@@ -292,6 +311,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 lines.push(format!(
                     "  await {page}.setViewportSize({{ width: {width}, height: {height} }});"
                 ));
+                current_viewport.insert(key, size);
             }
             Step::ScopedNavigation { kind, url, scope } => {
                 let page = page_for(scope, &mut pages, &mut lines);
@@ -729,6 +749,64 @@ mod tests {
         assert_eq!(
             render_playwright("hostile \"flow\"\nname", &steps).trim_end(),
             include_str!("test-fixtures/flow.spec.ts").trim_end()
+        );
+    }
+
+    #[test]
+    fn role_locators_use_exact_accessible_names() {
+        let steps = vec![Step::Pointer {
+            target: target(SelectorKind::Role {
+                role: "button".into(),
+                name: "Save".into(),
+                nth: None,
+            }),
+            kind: ClickKind::Click,
+            pointer: PointerKind::Mouse,
+            button: "left".into(),
+            count: 1,
+            position: None,
+            opens_popup: false,
+            popup_page: None,
+            scope: Scope::default(),
+            asserted_url: None,
+        }];
+
+        let rendered = render_playwright("roles", &steps);
+
+        // Capture resolved the ref by exact role and name, so a page with a
+        // `Save draft` button must not match here.
+        assert!(
+            rendered.contains("getByRole(\"button\", { name: \"Save\", exact: true })"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_resize_back_to_the_initial_viewport_stays_in_the_test() {
+        let viewport = |width: i64, height: i64| Step::ScopedViewport {
+            width,
+            height,
+            device_scale_factor: 1.0,
+            is_mobile: false,
+            scope: Scope::default(),
+        };
+        let steps = vec![viewport(1280, 720), viewport(800, 600), viewport(1280, 720)];
+
+        let rendered = render_playwright("viewports", &steps);
+
+        // The first step is the context setup that `test.use` already carries.
+        assert_eq!(
+            rendered.matches("setViewportSize").count(),
+            2,
+            "the resize and the return must both stay: {rendered}"
+        );
+        assert!(
+            rendered.contains("setViewportSize({ width: 800, height: 600 })"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("setViewportSize({ width: 1280, height: 720 })"),
+            "{rendered}"
         );
     }
 }

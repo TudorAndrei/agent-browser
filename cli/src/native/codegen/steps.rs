@@ -585,13 +585,25 @@ fn selector_target(selector: &str, refs: &RefMap) -> Target {
 }
 
 fn target(cmd: &Value, refs: &RefMap, capture: Option<&probe::ElementCapture>) -> Option<Target> {
+    targeted(cmd, refs, capture, true)
+}
+
+/// `prefer_unique` is false for an assertion that counts elements on purpose.
+/// Every other action ran against one element, so the probed unique selector
+/// must come first. Playwright refuses a locator that matches more than one.
+fn targeted(
+    cmd: &Value,
+    refs: &RefMap,
+    capture: Option<&probe::ElementCapture>,
+    prefer_unique: bool,
+) -> Option<Target> {
     let selector = cmd.get("selector").and_then(Value::as_str)?;
     if capture.is_some_and(|capture| capture.frame_probe_failed) {
         return None;
     }
     let mut target = selector_target(selector, refs);
     if let Some(probe) = capture.and_then(|capture| capture.probe.as_ref()) {
-        enrich_target(&mut target, probe);
+        enrich_target(&mut target, probe, prefer_unique);
     }
     (!target.selectors.is_empty()).then_some(target)
 }
@@ -942,7 +954,8 @@ pub fn record_action<C: Into<ActionContext>>(
             }
         }
         "isvisible" | "isenabled" | "ischecked" | "count" | "wait" => {
-            if let Some(target) = target(cmd, refs, capture) {
+            // A count assertion addresses every match on purpose.
+            if let Some(target) = targeted(cmd, refs, capture, action != "count") {
                 let mut properties = Map::new();
                 let mut visible = None;
                 let mut count = None;
@@ -1039,12 +1052,17 @@ pub fn record_action<C: Into<ActionContext>>(
     Ok(())
 }
 
-fn enrich_target(target: &mut Target, probe: &Probe) {
+fn enrich_target(target: &mut Target, probe: &Probe, prefer_unique: bool) {
     if let Some(selector) = &probe.selector {
         let candidate = SelectorKind::Css {
             value: selector.clone(),
         };
-        if !target.selectors.contains(&candidate) {
+        target.selectors.retain(|existing| existing != &candidate);
+        if prefer_unique {
+            // The probe returns a candidate only when it matches one element.
+            // The selector the user typed can match several.
+            target.selectors.insert(0, candidate);
+        } else {
             target.selectors.push(candidate);
         }
     }
@@ -1060,6 +1078,9 @@ fn enrich_target(target: &mut Target, probe: &Probe) {
 }
 
 fn enrich_step(step: &mut Step, probe: &Probe) {
+    // A count assertion matches several elements on purpose; every other step
+    // ran against one element.
+    let prefer_unique = !matches!(step, Step::WaitForElement { count: Some(_), .. });
     match step {
         Step::Click { target, .. }
         | Step::Pointer { target, .. }
@@ -1070,11 +1091,11 @@ fn enrich_step(step: &mut Step, probe: &Probe) {
         | Step::Type { target, .. }
         | Step::Select { target, .. }
         | Step::Upload { target, .. }
-        | Step::WaitForElement { target, .. } => enrich_target(target, probe),
+        | Step::WaitForElement { target, .. } => enrich_target(target, probe, prefer_unique),
         Step::Scroll {
             target: Some(target),
             ..
-        } => enrich_target(target, probe),
+        } => enrich_target(target, probe, prefer_unique),
         _ => {}
     }
 }
@@ -2094,6 +2115,73 @@ mod tests {
             step,
             Step::Pointer { asserted_url: Some(url), .. } if url == "https://example.com/next"
         )));
+    }
+
+    #[test]
+    fn a_single_element_action_prefers_the_probed_unique_selector() {
+        let probe = probe::Probe {
+            selector: Some("#first".to_string()),
+            test_id: None,
+            href: None,
+            input_type: None,
+        };
+        let capture = probe::ElementCapture {
+            probe: Some(probe.clone()),
+            ..probe::ElementCapture::default()
+        };
+
+        // `click button` on a page with two buttons acts on the first one.
+        // Playwright refuses a locator that matches both.
+        for selector in ["button", "xpath=//button"] {
+            let (_directory, mut state) = active_state();
+            state.viewport_emitted = true;
+            record_action(
+                "click",
+                &json!({ "selector": selector }),
+                &json!({}),
+                &RefMap::new(),
+                None,
+                Scope::default(),
+                Some(&capture),
+                &mut state,
+            )
+            .unwrap();
+            let Some(Step::Pointer { target, .. }) = state.steps.last() else {
+                panic!("the click should be recorded for {selector}");
+            };
+            assert_eq!(
+                target.selectors.first(),
+                Some(&SelectorKind::Css {
+                    value: "#first".to_string()
+                }),
+                "{selector} must not stay first"
+            );
+        }
+
+        // A count assertion addresses every match on purpose.
+        let (_directory, mut state) = active_state();
+        state.viewport_emitted = true;
+        record_action(
+            "count",
+            &json!({ "selector": "button" }),
+            &json!({ "count": 2 }),
+            &RefMap::new(),
+            None,
+            Scope::default(),
+            Some(&capture),
+            &mut state,
+        )
+        .unwrap();
+        let Some(Step::WaitForElement { target, .. }) = state.steps.last() else {
+            panic!("the count assertion should be recorded");
+        };
+        assert_eq!(
+            target.selectors.first(),
+            Some(&SelectorKind::Css {
+                value: "button".to_string()
+            }),
+            "a count assertion keeps its multi-element selector"
+        );
     }
 
     #[test]
