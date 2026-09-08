@@ -1534,6 +1534,81 @@ async fn e2e_codegen_keeps_a_navigation_url_off_an_earlier_click() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// Playwright resolves `frameLocator('iframe, frame').nth(index)` in document
+/// order. The CDP frame tree lists children in attachment order, so a page that
+/// attaches its frames out of document order must not decide the index.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_indexes_frames_in_document_order() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-frameorder-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-frameorder");
+    let (port, server) = start_a11y_frame_server().await;
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{port}/codegen-reordered") }),
+            &mut state,
+        )
+        .await,
+    );
+    // Let the second frame load and the first one attach after it.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "codegen_start", "title": "frameorder" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "frame", "url": "?first" }),
+            &mut state,
+        )
+        .await,
+    );
+    state.drain_cdp_events_background().await.unwrap();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "click", "selector": "#inside" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let scope = match state.codegen.steps.last() {
+        Some(super::codegen::Step::Pointer { scope, .. }) => scope.clone(),
+        other => panic!("the click should be recorded: {other:?}"),
+    };
+    assert_eq!(
+        scope.frame,
+        vec![0],
+        "the selected frame is first in the document, and attached second: {scope:?}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server.abort();
+}
+
 /// Replay the artifact. Every other codegen test checks what capture wrote;
 /// this one runs the generated spec in Playwright's own browser and requires it
 /// to pass its own assertions. Needs `pnpm install` and a Playwright browser.
@@ -11406,7 +11481,24 @@ async fn start_a11y_frame_server() -> (u16, tokio::task::JoinHandle<()>) {
                         r#"<!doctype html><body><button id="outer-inside">Outer</button><iframe name="inner" src="/codegen-inner"></iframe></body>"#
                             .to_string(),
                     ),
-                    "/codegen-inner" => (
+                    // The frame that comes second in the document attaches
+                    // first, so CDP frame-tree order and DOM order disagree.
+                    "/codegen-reordered" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><body><script>
+const second = document.createElement('iframe');
+second.src = '/codegen-inner?second';
+document.body.appendChild(second);
+second.addEventListener('load', () => {
+  const first = document.createElement('iframe');
+  first.src = '/codegen-inner?first';
+  document.body.insertBefore(first, second);
+});
+</script></body>"#
+                            .to_string(),
+                    ),
+                    path if path.starts_with("/codegen-inner") => (
                         "200 OK",
                         "text/html",
                         r#"<!doctype html><body><button id="inside">Inside</button></body>"#

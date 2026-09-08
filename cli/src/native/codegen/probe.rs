@@ -180,6 +180,13 @@ pub async fn probe_url(client: &CdpClient, session_id: &str) -> Result<String, S
         .ok_or_else(|| "Could not read page URL for codegen".to_string())
 }
 
+/// Index path of a frame, counted in document order.
+///
+/// Playwright resolves `frameLocator('iframe, frame').nth(index)` in document
+/// order, and Recorder resolves its frame path the same way. The CDP frame tree
+/// lists children in attachment order, which a page can reorder, so the tree
+/// cannot decide the index. The owner element is asked instead, and a frame
+/// whose path cannot be established fails rather than guesses.
 pub async fn frame_index_path(
     client: &CdpClient,
     session_id: &str,
@@ -190,9 +197,13 @@ pub async fn frame_index_path(
         .await?;
     let root = tree
         .get("frameTree")
+        .and_then(|tree| tree.get("frame"))
+        .and_then(|frame| frame.get("id"))
+        .and_then(serde_json::Value::as_str)
         .ok_or("Could not read frame tree for codegen")?;
-    if let Some(path) = frame_index_path_in_tree(root, frame_id) {
-        return Ok(path);
+    // The main frame has no owner element and no index path.
+    if root == frame_id {
+        return Ok(Vec::new());
     }
     frame_owner_index_path(client, session_id, frame_id).await
 }
@@ -263,38 +274,9 @@ async fn frame_owner_index_path(
         .map_err(|error| format!("Could not decode frame owner path: {error}"))
 }
 
-fn frame_index_path_in_tree(tree: &serde_json::Value, wanted: &str) -> Option<Vec<usize>> {
-    fn visit(tree: &serde_json::Value, wanted: &str, path: &mut Vec<usize>) -> bool {
-        if tree
-            .get("frame")
-            .and_then(|frame| frame.get("id"))
-            .and_then(|id| id.as_str())
-            == Some(wanted)
-        {
-            return true;
-        }
-        if let Some(children) = tree.get("childFrames").and_then(|value| value.as_array()) {
-            for (index, child) in children.iter().enumerate() {
-                path.push(index);
-                if visit(child, wanted, path) {
-                    return true;
-                }
-                path.pop();
-            }
-        }
-        false
-    }
-    let mut path = Vec::new();
-    if visit(tree, wanted, &mut path) {
-        Some(path)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{frame_index_path_in_tree, probe_from_value};
+    use super::probe_from_value;
     use serde_json::json;
 
     #[test]
@@ -309,22 +291,5 @@ mod tests {
         assert_eq!(probe.selector.as_deref(), Some("button:nth-of-type(2)"));
         assert_eq!(probe.test_id, None);
         assert_eq!(probe.input_type.as_deref(), Some("password"));
-    }
-
-    #[test]
-    fn frame_index_path_tracks_nested_iframes() {
-        let tree = json!({
-            "frame": { "id": "root" },
-            "childFrames": [
-                { "frame": { "id": "first" } },
-                { "frame": { "id": "second" }, "childFrames": [
-                    { "frame": { "id": "nested" } }
-                ] }
-            ]
-        });
-        assert_eq!(frame_index_path_in_tree(&tree, "root"), Some(vec![]));
-        assert_eq!(frame_index_path_in_tree(&tree, "first"), Some(vec![0]));
-        assert_eq!(frame_index_path_in_tree(&tree, "nested"), Some(vec![1, 0]));
-        assert_eq!(frame_index_path_in_tree(&tree, "missing"), None);
     }
 }

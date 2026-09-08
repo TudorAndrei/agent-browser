@@ -3226,17 +3226,27 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                             None => state.active_frame_id.clone(),
                         };
                         if let Some(frame_id) = frame_id.as_deref() {
-                            if let Ok(frame) = codegen::probe::frame_index_path(
+                            match codegen::probe::frame_index_path(
                                 &client,
                                 &page.session_id,
                                 frame_id,
                             )
                             .await
                             {
-                                codegen::set_frame_scope(
+                                Ok(frame) => codegen::set_frame_scope(
                                     &mut state.codegen.steps[capture_start..],
                                     frame,
-                                );
+                                ),
+                                // Without the path the step keeps the page
+                                // scope, which points at the main document
+                                // rather than the frame the command used.
+                                Err(error) => state.codegen.capture_warning(
+                                    "frame-scope-failed",
+                                    &format!(
+                                        "Codegen could not place the action in its frame, so the step targets the page: {error}"
+                                    ),
+                                    None,
+                                ),
                             }
                         }
                     }
