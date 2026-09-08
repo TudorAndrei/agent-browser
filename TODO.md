@@ -154,19 +154,20 @@ The original implementation and review are summarized in `PLAN.md`. This checkli
 - [x] Add the same text to `skill-data/core/references/codegen.md`
 - [x] Document that `record start --url` becomes a recorded navigation, and document the `unrecorded-navigation` warning, on both surfaces
 - [x] Document that a new tab inherits the session setup and that a generated artifact does not contain that setup
-- [ ] Remove `PLAN.md` and `TODO.md` from the branch that becomes the upstream pull request, and keep them on the fork `main`
+- [x] Remove `PLAN.md` and `TODO.md` from the branch that becomes the upstream pull request, and keep them on the fork `main` (branch `codegen`)
 - [x] Confirm that the branch has no changelog or dashboard change
 - [x] Commit: `docs(codegen): document unrecorded page changes`
 
 ## Verification after the upstream merge
 
-- [x] `cargo test --manifest-path cli/Cargo.toml` (1330 passed, 0 failed, 130 ignored)
+- [x] `cargo test --manifest-path cli/Cargo.toml` (1338 passed, 0 failed, 132 ignored)
 - [x] `cargo fmt --manifest-path cli/Cargo.toml -- --check`
 - [x] `cargo clippy --manifest-path cli/Cargo.toml` (2 warnings remain; `git blame` shows both come from upstream code)
 - [x] `pnpm test:codegen-formats` (2 passed)
 - [x] `pnpm --dir docs lint`
 - [x] `pnpm --dir docs build`
-- [ ] `cargo test --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1`
+- [x] `cargo test --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1` (every test up to `e2e_webmcp_discovery_invocation_and_cancellation` passed; that upstream test overflows its stack and aborts the process. The same test overflows at commit `8724005`, before Phase 6, so the fault comes from upstream v0.37.0 and not from this work.)
+- [x] Both new codegen e2e tests pass against Chrome: `e2e_codegen_records_the_page_move_made_by_record_start` and `e2e_codegen_warns_and_keeps_the_navigate_after_an_unrecorded_move`
 
 ## Review
 

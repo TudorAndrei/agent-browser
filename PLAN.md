@@ -376,6 +376,8 @@ Each phase must keep CLI and MCP behavior aligned and update relevant user docum
 - `pnpm --dir docs build`
 - `cargo test --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1`
 
+The ignored Chrome suite stops at the upstream test `e2e_webmcp_discovery_invocation_and_cancellation`, which overflows its stack and aborts the test process. The same test overflows at commit `8724005`, before this repair, so the fault comes from upstream v0.37.0. Report it upstream instead of repairing it here.
+
 Dashboard checks are not required because the dashboard has no codegen surface.
 
 ## Risks and tradeoffs
