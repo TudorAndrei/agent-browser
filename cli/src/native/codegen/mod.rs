@@ -12,9 +12,10 @@ pub use playwright::{render_playwright_with_report, FormatIssue};
 pub use probe::ElementCapture;
 #[allow(unused_imports)]
 pub use steps::{
-    action_can_navigate, attach_navigation, bind_popup, can_assert_navigation, can_open_popup,
-    enrich_recent_steps, has_frame_scope, mark_popup, record_action, set_frame_scope, step_scope,
-    ActionContext, ClickKind, NavigationKind, PointerKind, Scope, SelectorKind, Step, Target,
+    action_breaks_navigation_attribution, action_can_navigate, attach_navigation, bind_popup,
+    can_assert_navigation, can_open_popup, enrich_recent_steps, has_frame_scope, mark_popup,
+    record_action, set_frame_scope, step_scope, ActionContext, ClickKind, NavigationKind,
+    PointerKind, Scope, SelectorKind, Step, Target,
 };
 
 use serde::{Deserialize, Serialize};
@@ -514,6 +515,14 @@ impl CodegenState {
             page.closed = true;
             page.target_id = None;
         }
+        self.pending_navigation.remove(page_id);
+        self.pending_popup.remove(page_id);
+    }
+
+    /// Drop the pending navigation and popup steps for a page. A command that
+    /// codegen cannot attribute must not let its own page move attach a URL to
+    /// an earlier click.
+    pub fn discard_pending_steps(&mut self, page_id: &str) {
         self.pending_navigation.remove(page_id);
         self.pending_popup.remove(page_id);
     }

@@ -1242,6 +1242,106 @@ async fn e2e_codegen_attaches_navigation_to_its_last_step() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// `record start --url` navigates the active page, so codegen must record that
+/// move as a real navigation step. A click that did not navigate must not
+/// receive the recorded URL as an assertion. Needs ffmpeg on PATH.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_records_the_page_move_made_by_record_start() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-record-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-record");
+    let take = std::env::temp_dir().join(format!("ab-e2e-codegen-rec-{}.webm", std::process::id()));
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "record" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<button id=noop>Noop</button>" }),
+            &mut state,
+        )
+        .await,
+    );
+    // A click that does not navigate leaves a pending navigation assertion.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "click", "selector": "#noop" }),
+            &mut state,
+        )
+        .await,
+    );
+    let recorded_url = "data:text/html,<h1>Recorded</h1>";
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "5",
+                "action": "recording_start",
+                "path": take.to_string_lossy(),
+                "url": recorded_url,
+            }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "recording_stop" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "7", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let steps = get_data(&stop)["flow"]["steps"]
+        .as_array()
+        .expect("the flow should have steps")
+        .clone();
+
+    let last = steps.last().expect("the flow should not be empty");
+    assert_eq!(last["type"], "navigate");
+    assert_eq!(last["url"], recorded_url);
+
+    let click = steps
+        .iter()
+        .find(|step| step["type"] == "click")
+        .expect("the click should stay in the flow");
+    assert!(
+        click["assertedEvents"].is_null(),
+        "the click did not navigate, so it must have no asserted URL: {click}"
+    );
+
+    let _ = std::fs::remove_file(&take);
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_codegen_preserves_enter_navigation_and_initial_url() {

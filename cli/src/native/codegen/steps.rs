@@ -649,7 +649,7 @@ fn action_support(action: &str) -> ActionSupport {
         "navigate" | "back" | "forward" | "reload" | "click" | "tap" | "dblclick" | "check"
         | "uncheck" | "hover" | "fill" | "setvalue" | "type" | "select" | "upload" | "press"
         | "scroll" | "viewport" | "isvisible" | "isenabled" | "ischecked" | "count" | "wait"
-        | "tab_new" | "tab_close" => ActionSupport::Recorded,
+        | "tab_new" | "tab_close" | "recording_start" => ActionSupport::Recorded,
         "snapshot" | "screenshot" | "gettext" | "getattribute" | "url" | "cdp_url" | "title"
         | "content" | "read" | "console" | "errors" | "inspect" | "boundingbox" | "innertext"
         | "innerhtml" | "inputvalue" | "styles" | "cookies_get" | "storage_get"
@@ -658,9 +658,19 @@ fn action_support(action: &str) -> ActionSupport {
         | "requests" | "request_detail" | "react_tree" | "react_inspect" | "react_suspense"
         | "vitals" | "tab_list" | "tab_switch" | "stream_status" | "device_list"
         | "codegen_start" | "codegen_stop" | "codegen_status" | "codegen_discard" | "launch"
-        | "close" | "webmcp_list" | "webmcp_result" => ActionSupport::Observation,
+        | "close" | "webmcp_list" | "webmcp_result" | "recording_stop" => {
+            ActionSupport::Observation
+        }
         _ => ActionSupport::Omitted,
     }
+}
+
+/// Codegen cannot attribute a page move to a command that it does not record.
+/// `record start --url` navigates the active page, and an omitted command can
+/// run arbitrary page script, so neither can keep an earlier pending
+/// assertion. A missing assertion is safer than a false one.
+pub fn action_breaks_navigation_attribution(action: &str) -> bool {
+    action == "recording_start" || matches!(action_support(action), ActionSupport::Omitted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -684,6 +694,25 @@ pub fn record_action<C: Into<ActionContext>>(
     match action {
         "navigate" => {
             if let Some(url) = cmd.get("url").and_then(Value::as_str) {
+                if state.page_url(&sc.target) != Some(url) {
+                    steps.push(Step::ScopedNavigation {
+                        kind: NavigationKind::Goto,
+                        url: url.to_string(),
+                        scope: sc.clone(),
+                    });
+                    state.update_page_url(&sc.target, url);
+                }
+            }
+        }
+        // `record start --url` calls the same navigate path as a user
+        // `navigate`, so the page move is exact page intent. The screencast
+        // attach itself is a recording lifecycle event and emits nothing.
+        "recording_start" => {
+            if let Some(url) = cmd
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|url| !url.is_empty())
+            {
                 if state.page_url(&sc.target) != Some(url) {
                     steps.push(Step::ScopedNavigation {
                         kind: NavigationKind::Goto,
@@ -1890,6 +1919,129 @@ mod tests {
         assert_eq!(state.steps.len(), 0);
         assert_eq!(state.capture_errors.len(), 1);
         assert!(state.capture_errors[0].starts_with("omitted-action:"));
+    }
+
+    #[test]
+    fn record_start_with_a_url_becomes_a_navigation_step() {
+        let (_directory, mut state) = active_state();
+        state.viewport_emitted = true;
+        record_action(
+            "recording_start",
+            &json!({ "path": "take.webm", "url": "https://example.com/one" }),
+            &json!({}),
+            &RefMap::new(),
+            None,
+            Scope {
+                target: "p1".to_string(),
+                frame: Vec::new(),
+            },
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            state.steps.last(),
+            Some(Step::ScopedNavigation {
+                kind: NavigationKind::Goto,
+                url,
+                scope,
+            }) if url == "https://example.com/one" && scope.target == "p1"
+        ));
+        assert!(state.capture_errors.is_empty());
+        assert_eq!(state.page_url("p1"), Some("https://example.com/one"));
+    }
+
+    #[test]
+    fn record_commands_that_do_not_move_a_page_capture_nothing() {
+        for (action, cmd) in [
+            ("recording_start", json!({ "path": "take.webm" })),
+            ("recording_stop", json!({})),
+        ] {
+            let (_directory, mut state) = active_state();
+            record_action(
+                action,
+                &cmd,
+                &json!({}),
+                &RefMap::new(),
+                None,
+                Scope::default(),
+                None,
+                &mut state,
+            )
+            .unwrap();
+            assert!(state.steps.is_empty(), "{action} produced a step");
+            assert!(
+                state.capture_errors.is_empty(),
+                "{action} produced a warning"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unattributable_command_cannot_assert_a_url_on_an_earlier_click() {
+        assert!(action_breaks_navigation_attribution("recording_start"));
+        assert!(action_breaks_navigation_attribution("webmcp_invoke"));
+        assert!(action_breaks_navigation_attribution("evaluate"));
+        assert!(!action_breaks_navigation_attribution("click"));
+        assert!(!action_breaks_navigation_attribution("snapshot"));
+
+        let (_directory, mut state) = active_state();
+        state.viewport_emitted = true;
+        record_action(
+            "click",
+            &json!({ "selector": "#button" }),
+            &json!({}),
+            &RefMap::new(),
+            None,
+            Scope {
+                target: "p1".to_string(),
+                frame: Vec::new(),
+            },
+            None,
+            &mut state,
+        )
+        .unwrap();
+        assert!(state.pending_navigation.contains_key("p1"));
+
+        // `execute_command` drops the pending step before it dispatches an
+        // unattributable command, so the page move that follows cannot become
+        // an assertion on the click.
+        state.discard_pending_steps("p1");
+        assert!(!state.observe_navigation("p1", "https://example.com/recorded"));
+        assert!(state.steps.iter().all(|step| !matches!(
+            step,
+            Step::Pointer {
+                asserted_url: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_click_that_navigates_keeps_its_asserted_url() {
+        let (_directory, mut state) = active_state();
+        state.viewport_emitted = true;
+        record_action(
+            "click",
+            &json!({ "selector": "#button" }),
+            &json!({}),
+            &RefMap::new(),
+            None,
+            Scope {
+                target: "p1".to_string(),
+                frame: Vec::new(),
+            },
+            None,
+            &mut state,
+        )
+        .unwrap();
+
+        assert!(state.observe_navigation("p1", "https://example.com/next"));
+        assert!(state.steps.iter().any(|step| matches!(
+            step,
+            Step::Pointer { asserted_url: Some(url), .. } if url == "https://example.com/next"
+        )));
     }
 
     #[test]

@@ -2846,6 +2846,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    // A command that codegen cannot attribute can move the page. Apply the
+    // events that are already available first, so a real late navigation still
+    // reaches the action that caused it.
+    let breaks_navigation_attribution =
+        state.codegen.is_active() && codegen::action_breaks_navigation_attribution(action);
+    if breaks_navigation_attribution {
+        let _ = state.drain_cdp_events_background().await;
+    }
+
     // Capture the page that will receive the command before dispatch. A tab
     // command can change the active page before codegen sees the result.
     let pre_browser_external = state
@@ -2873,6 +2882,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     } else {
         None
     };
+
+    if breaks_navigation_attribution {
+        if let Some(page) = pre_action_page.as_ref() {
+            state.codegen.discard_pending_steps(&page.page_id);
+        }
+    }
 
     let mut result = match action {
         "launch" => {
