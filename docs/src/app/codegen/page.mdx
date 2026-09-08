@@ -35,7 +35,15 @@ agent-browser codegen stop ./login.spec.ts --format playwright
 
 `codegen` is not [Video Recording](/recording). `record` saves a WebM while `codegen` writes a replayable browser-test artifact.
 
-Direct CSS selectors, <code>xpath=</code> selectors, snapshot refs with accessible names, and uniquely probed test IDs can become safe targets. Codegen omits an action when it cannot produce a safe target. Direct <code>text=</code> selectors, bare XPath, semantic locator marker actions, and most wait variants are not recorded. Other successful mutating or wait commands produce omission warnings. Read all warnings before you use the artifact.
+Direct CSS selectors, <code>xpath=</code> selectors, snapshot refs with accessible names, and uniquely probed test IDs can become safe targets. Codegen omits an action when it cannot produce a safe target. Direct <code>text=</code> selectors, bare XPath, semantic locator marker actions, most wait variants, <code>evaluate</code>, and <code>webmcp invoke</code> are not recorded. <code>webmcp list</code> and <code>webmcp result</code> are observations and record nothing. Other successful mutating or wait commands produce omission warnings. Read all warnings before you use the artifact.
+
+## Page moves that codegen does not record
+
+`record start --url` navigates the active page, so codegen records that move as a normal navigation step. `record start` without a URL and `record stop` change no page and record nothing.
+
+A command that codegen cannot record can still move a page. `evaluate` and `webmcp invoke` run page script with an unknown effect. Codegen then reports an `unrecorded-navigation` warning that names the command and the page. The flow has no step that reaches the new page, so the next `navigate` on that page always emits a step, even when the URL looks unchanged. Add the missing steps yourself, or capture the flow again without those commands.
+
+A new tab inherits the session setup, which can include init scripts and authentication state. A generated artifact does not contain that setup.
 
 ## Security
 

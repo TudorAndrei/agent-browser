@@ -367,6 +367,8 @@ Use `agent-browser codegen status` to inspect recovery state, capture and securi
 
 Recorder JSON has a smaller action set than Playwright. Read the captured, internal, emitted, omitted, and lossy counts and grouped format warnings from `codegen stop`. Use Playwright when the flow needs sequential typing, multi-select, upload, exact page identity, or explicit page creation.
 
+`record start --url` navigates the active page, so codegen records it as a navigation step. A command that codegen cannot record, such as `evaluate` or `webmcp invoke`, can also move a page. Codegen then reports an `unrecorded-navigation` warning, and the flow has no step that reaches the new page.
+
 ### Iframes
 
 Iframes are auto-inlined in the snapshot — their refs work transparently:
