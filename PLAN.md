@@ -222,20 +222,38 @@ Add command-count tests for the codegen CDP path. Measure codegen-active timing 
 
 Upstream PR #1776 changed `record start`. It no longer makes a new browser context and a new page. It attaches the screencast to the active page, and `record start --url` navigates that active page.
 
-This breaks a capture assumption. Before the change, the new recording page appeared as a new CDP target, so `sync_runtime_pages` gave it a new logical page and its own URL. After the change, the tracked logical page keeps its identity but silently gets a different URL. `recording_start` is an omitted action, so `record_action` writes an omission warning, but nothing updates `PageIdentity::url`, and `action_can_navigate` does not contain `recording_start`.
+This breaks a capture assumption. Before the change, the new recording page appeared as a new CDP target, so `sync_runtime_pages` gave it a new logical page and its own URL. After the change, the tracked logical page keeps its identity and gets a different URL with no recorded step.
+
+The tracked URL does not stay stale. `sync_runtime_pages` at `cli/src/native/codegen/mod.rs:415` writes `page.url` from the live page list, and `cli/src/native/codegen/mod.rs:436` sends each observed change to `observe_navigation`. The post-action capture block calls both `drain_cdp_events_background` and `sync_runtime_pages` at `cli/src/native/actions.rs:3116`. The URL therefore updates silently, with no step and no warning.
 
 Two failures follow:
 
-- A later `navigate` to the same URL is dropped, because `record_action` skips a navigate step when `state.page_url(&scope.target)` is already equal to the requested URL. The flow then has no step that reaches the page.
-- Every following recorded action runs against a page that the generated artifact never opened. The artifact stays schema-valid and looks correct. The safety contract forbids this.
+- A later `navigate` to the same URL is dropped, because `record_action` skips a navigate step when `state.page_url(&scope.target)` is already equal to the requested URL (`cli/src/native/codegen/steps.rs:687`). The flow then has no step that reaches the page. Every following recorded action runs against a page that the generated artifact never opened. The artifact stays schema-valid and looks correct. The safety contract forbids this.
+- `observe_navigation` attaches the new URL to any pending step on that page (`cli/src/native/codegen/mod.rs:590`). `pending_navigation` is not removed after an observation. It stays until the next navigation-capable action on the page replaces it (`cli/src/native/codegen/mod.rs:561`). A `click` that did not navigate, followed by `record start --url X`, therefore gives that click a false `asserted_url` of `X`. A false assertion is worse than a missing step.
 
-Upstream PR #1757 added `webmcp invoke`. A page-side tool call can also navigate or change the page, so it has the same class of gap.
+Upstream PR #1757 added `webmcp invoke`. A page-side tool call can also navigate or change the page.
 
-The repair keeps the "codegen must not guess" rule. Codegen does not invent a navigation step for a command that it cannot express. It records the true URL, marks that the change was not captured, and makes the next explicit navigate on that page emit a step.
+### Two different repairs
 
-Add `action_can_change_url_without_capture(action)` in `cli/src/native/codegen/steps.rs` for `recording_start` and `webmcp_invoke`. When such an action is successful and codegen is active, read the post-action URL from the pre-action page session with `probe::probe_url`. This is the same call that the navigation path already uses. Do not use `observe_navigation`, because it attaches a URL assertion to a pending recorded step. Add `CodegenState::observe_unrecorded_navigation(page_id, url)` instead. It updates the page URL, sets a new `url_unrecorded` flag on `PageIdentity`, and adds an `unrecorded-navigation` capture warning. The warning names the action and the logical page and contains no captured values.
+`record start --url` and `webmcp invoke` are not the same case, so one rule is wrong for both.
 
-`record_action` clears `url_unrecorded` when it emits a navigate step for that page. While the flag is set, the dedupe cannot drop the step. The flag is page state, so the journal carries it in the existing page-state `update` record, and recovery restores it.
+**`record start --url` is an exact navigation.** `handle_recording_start` calls `navigate_active_page(state, url, WaitUntil::Load)` at `cli/src/native/actions.rs:7613`. That is the same path a user `navigate` takes, and the URL comes from `cmd["url"]`, the same source that the `navigate` arm reads at `cli/src/native/codegen/steps.rs:686`. Codegen can express this exactly, so a goto step is not a guess. Add a `recording_start` arm to `record_action` that emits a scoped goto when `cmd["url"]` is present. The screencast attach itself is a recording lifecycle event with no page intent.
+
+Also reclassify. `record start` without `--url` and `record stop` do not change the page. Both currently fall to the `_ => Omitted` arm at `cli/src/native/codegen/steps.rs:662` and produce a false `omitted-action` warning.
+
+**`webmcp invoke` has an unknown effect.** Codegen cannot express it. The same is true of every other omitted action that runs page code, such as `evaluate`, `keydown`, `mouseup`, `inserttext`, and `dialog_accept`. A two-name list is a partial repair, so use the class instead: `action_support(action) == ActionSupport::Omitted`.
+
+For that class, compare the post-action URL with the pre-action page URL held in `pre_action_page` (`cli/src/native/actions.rs:3128`). On a difference, set a new `url_unrecorded` flag for the page and add an `unrecorded-navigation` capture warning that names the action and the logical page and contains no captured values. While the flag is set, the dedupe at `cli/src/native/codegen/steps.rs:687` cannot drop a navigate step. Only an emitted goto clears the flag. `back`, `forward`, and `reload` do not clear it, because they do not prove that the flow reached the URL.
+
+The flag belongs on `sidecar::PersistedPage` (`cli/src/native/codegen/sidecar.rs:31`), not on `PageIdentity` (`cli/src/native/codegen/mod.rs:246`). `PageIdentity` is a transient value that each sync rebuilds. `PersistedPage` is journalled as a whole-snapshot `Pages` record, so a `#[serde(default)]` field needs no other recovery work.
+
+### Pending steps and failed commands
+
+Before an omitted action is dispatched, drain available events and then remove `pending_navigation` and `pending_popup` for the active page. Without this, the drain that follows the command attaches the new URL to a stale click. The pre-dispatch sync at `cli/src/native/actions.rs:2855` does not drain today.
+
+The capture block runs only on a successful result (`cli/src/native/actions.rs:3066`). `record start --url` can navigate and then fail later in `handle_recording_start`. Check the URL on both result arms, so a failed command cannot move a page without a warning.
+
+`webmcp invoke --detach` returns before the page tool runs, so a post-action URL check sees nothing. While `state.webmcp` holds a pending invocation for the session, treat a later URL change that has no pending step as unrecorded.
 
 Upstream PR #1777 makes a new tab inherit the session setup, which can include init scripts. A generated artifact does not contain that setup. This is a documentation matter, not a capture defect.
 
@@ -318,22 +336,31 @@ Each phase must keep CLI and MCP behavior aligned and update relevant user docum
 - Confirm that no dashboard or changelog changes were added.
   **Commit:** `docs(codegen): document durable flow generation`
 
-### Phase 6: Unrecorded page changes from upstream v0.37.0 commands
+### Phase 6: Record the `record start` navigation and stop false assertions
 
-- Add `action_can_change_url_without_capture` in `cli/src/native/codegen/steps.rs` for `recording_start` and `webmcp_invoke`.
-- Add `url_unrecorded` to `PageIdentity` in `cli/src/native/codegen/mod.rs`, and carry it in the page-state journal `update` record and in recovery.
-- Add `CodegenState::observe_unrecorded_navigation`, which updates the page URL, sets the flag, and adds an `unrecorded-navigation` capture warning without captured values.
-- Call the new URL check in `cli/src/native/actions.rs` after a successful action of that class, using the pre-action page session.
-- Make `record_action` emit a navigate step while `url_unrecorded` is set, and clear the flag when it emits that step.
-- Report `unrecorded-navigation` in `codegen status` and `codegen stop` warning counts.
-- Add unit tests for the classifier, the flag, the dedupe behavior, the warning text, and journal recovery of the flag.
-- Add ignored Chrome e2e tests for `record start --url` during capture and for a later navigate to the same URL.
-  **Commit:** `fix(codegen): keep page URL true after unrecorded commands`
+- Add a `recording_start` arm to `record_action` in `cli/src/native/codegen/steps.rs` that emits a scoped goto when `cmd["url"]` is present.
+- Classify `recording_start` and `recording_stop` in `action_support` so neither makes a false `omitted-action` warning.
+- Drain available events before an omitted action is dispatched, then remove `pending_navigation` and `pending_popup` for the active page.
+- Add unit tests for the new navigation step, for the classification, and for a `click` followed by `record start --url` that must not get an asserted URL.
+- Add an ignored Chrome e2e test for capture across `record start --url`.
+  **Commit:** `fix(codegen): record the page move made by record start`
 
-### Phase 7: Upstream v0.37.0 documentation and pull-request hygiene
+### Phase 7: Mark page changes that codegen cannot express
+
+- Add `url_unrecorded` to `sidecar::PersistedPage` with `#[serde(default)]`, and to the runtime page state.
+- Add `CodegenState::observe_unrecorded_navigation`, which sets the flag and adds an `unrecorded-navigation` capture warning with no captured values.
+- Compare the post-action URL with the `pre_action_page` URL for every action that `action_support` classifies as omitted, on both the successful and the failed result arm.
+- Treat a later unattributed URL change as unrecorded while `state.webmcp` holds a pending detached invocation for the session.
+- Make the dedupe in the `navigate` arm emit a step while the flag is set, and clear the flag only when it emits a goto for that page.
+- Confirm that the `codegen status` and `codegen stop` warning counters parse the new code, because `capture_warning` stores `"code: message"` strings (`cli/src/native/codegen/mod.rs:857`).
+- Add unit tests for the flag, the dedupe behavior, the warning text, journal recovery of the flag, and `back`, `forward`, and `reload`, which must not clear the flag.
+- Add an ignored Chrome e2e test for `webmcp invoke` that navigates, followed by a navigate to the same URL.
+  **Commit:** `fix(codegen): warn when a command moves a page without capture`
+
+### Phase 8: Upstream v0.37.0 documentation and pull-request hygiene
 
 - Add the WebMCP commands to the "not recorded" text in `docs/src/app/codegen/page.mdx` and `skill-data/core/references/codegen.md`.
-- Document that `record start --url` can move the active page, that codegen warns with `unrecorded-navigation`, and that `record` and `codegen` are still different features.
+- Document that `record start --url` becomes a recorded navigation, that another command that moves a page makes an `unrecorded-navigation` warning, and that `record` and `codegen` are still different features.
 - Document that a new tab inherits the session setup, and that a generated artifact does not contain that setup.
 - Remove `PLAN.md` and `TODO.md` from the branch that becomes the upstream pull request. Keep them on the fork `main`.
 - Confirm that the branch has no changelog or dashboard change.
@@ -361,13 +388,14 @@ Dashboard checks are not required because the dashboard has no codegen surface.
 - Use four CDP round trips per recorded step as the conservative maximum for the active capture hook. Inactive codegen adds no capture calls.
 - Frame index parity between CDP and Playwright must be proved with real browser fixtures. Unproved cases are omitted with warnings.
 - Keeping degraded capture in memory permits useful stop output but cannot make unjournaled actions recoverable after daemon loss.
-- The `url_unrecorded` flag keeps the flow honest, but it cannot rebuild the missing navigation. A flow that uses `record start --url` or `webmcp invoke` and then never navigates again still needs the warning to tell the user that the artifact is incomplete.
-- The URL check adds one CDP round trip after `record start` and `webmcp invoke` while codegen is active. This stays inside the agreed maximum of four round trips per recorded step.
+- The `url_unrecorded` flag keeps the flow honest, but it cannot rebuild the missing navigation. A flow that uses `webmcp invoke` to move a page and then never navigates again still needs the warning to tell the user that the artifact is incomplete.
+- The flag uses the whole omitted class, so an omitted command with a page effect that does not change the URL still passes without a flag. Only per-command attribution is sound. Codegen cannot prove what page script did.
+- Removing pending steps before an omitted action loses a real assertion when that omitted action follows a click that navigates late. A missing assertion is safer than a false one.
 
 ## Open questions
 
 The design for Phases 1 to 5 was confirmed with the user on 2026-08-12. Implementation and verification finished on 2026-08-14.
 
-Phases 6 and 7 come from the upstream v0.37.0 merge on 2026-09-08. One decision is open:
+Phases 6, 7, and 8 come from the upstream v0.37.0 merge on 2026-09-08. A review on 2026-09-08 corrected the first version of these phases. It showed that the tracked URL does update, that a stale pending step can receive a false asserted URL, and that `record start --url` is an exact navigation that codegen can express. One decision is open:
 
-- Phase 6 makes `record start` and `webmcp invoke` set `url_unrecorded`. An alternative is to record the observed URL as a navigate step. This plan rejects that alternative, because codegen would then invent a step for a command that it cannot express. Confirm this choice before implementation starts.
+- Phase 6 emits a real navigation step for `record start --url`. This treats a recording command as page intent, which a reviewer of the generated artifact may not expect. The alternative is to warn only, and to accept an artifact that never reaches the page. Confirm this choice before implementation starts.
