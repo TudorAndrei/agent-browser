@@ -1395,6 +1395,7 @@ mod tests {
                 value: "#password".to_string(),
             }],
             input_type: Some("password".to_string()),
+            verified: true,
         };
         let mut state = restored_state(&directory);
         state.title = "login".to_string();
@@ -1550,6 +1551,7 @@ mod tests {
                 value: "#submit".to_string(),
             }],
             input_type: None,
+            verified: true,
         };
         let steps = vec![
             Step::ScopedViewport {
@@ -1664,6 +1666,7 @@ mod tests {
                         value: "#field".to_string(),
                     }],
                     input_type: None,
+                    verified: true,
                 },
                 text: "secret".to_string(),
                 clear: false,
@@ -1779,6 +1782,7 @@ mod tests {
                         value: "#open".to_string(),
                     }],
                     input_type: None,
+                    verified: true,
                 },
                 kind: ClickKind::Click,
                 pointer: PointerKind::Mouse,
@@ -1810,6 +1814,7 @@ mod tests {
                         value: "#open-again".to_string(),
                     }],
                     input_type: None,
+                    verified: true,
                 },
                 kind: ClickKind::Click,
                 pointer: PointerKind::Mouse,
@@ -1863,6 +1868,7 @@ mod tests {
                             value: selector.to_string(),
                         }],
                         input_type: None,
+                        verified: true,
                     },
                     kind: ClickKind::Click,
                     pointer: PointerKind::Mouse,

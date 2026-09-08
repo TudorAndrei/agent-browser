@@ -20,11 +20,49 @@ fn js(value: &str) -> String {
     serde_json::to_string(value).expect("a Rust string is valid JSON")
 }
 
-fn locator(target: &Target, page: &str, frame: &[usize]) -> Option<String> {
+/// The target of a step that addresses exactly one element. A count assertion
+/// matches several on purpose, so it is not one of these.
+fn single_element_target(step: &Step) -> Option<&Target> {
+    match step {
+        Step::Click { target, .. }
+        | Step::Pointer { target, .. }
+        | Step::Hover { target, .. }
+        | Step::Change { target, .. }
+        | Step::Fill { target, .. }
+        | Step::SetValue { target, .. }
+        | Step::Type { target, .. }
+        | Step::Select { target, .. }
+        | Step::Upload { target, .. } => Some(target),
+        Step::WaitForElement {
+            target,
+            count: None,
+            ..
+        } => Some(target),
+        Step::Scroll {
+            target: Some(target),
+            ..
+        }
+        | Step::Wheel {
+            target: Some(target),
+            ..
+        } => Some(target),
+        _ => None,
+    }
+}
+
+/// `single` marks a step that acted on one element. Playwright refuses a
+/// locator that matches several, so an unverified selector gets `.first()`,
+/// which is what the command itself did when the browser resolved it.
+fn locator(target: &Target, page: &str, frame: &[usize], single: bool) -> Option<String> {
     let mut root = page.to_string();
     for index in frame {
         root.push_str(&format!(".frameLocator('iframe, frame').nth({index})"));
     }
+    let suffix = if single && !target.verified {
+        ".first()"
+    } else {
+        ""
+    };
     target.selectors.iter().find_map(|selector| match selector {
         SelectorKind::TestId { value } if !value.is_empty() => {
             Some(format!("{root}.getByTestId({})", js(value)))
@@ -44,11 +82,12 @@ fn locator(target: &Target, page: &str, frame: &[usize]) -> Option<String> {
             Some(result)
         }
         SelectorKind::Css { value } if !value.is_empty() => {
-            Some(format!("{root}.locator({})", js(value)))
+            Some(format!("{root}.locator({}){suffix}", js(value)))
         }
-        SelectorKind::XPath { value } if !value.is_empty() => {
-            Some(format!("{root}.locator({})", js(&format!("xpath={value}"))))
-        }
+        SelectorKind::XPath { value } if !value.is_empty() => Some(format!(
+            "{root}.locator({}){suffix}",
+            js(&format!("xpath={value}"))
+        )),
         _ => None,
     })
 }
@@ -134,6 +173,14 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
     let mut emitted = 0usize;
     for (step_index, step) in steps.iter().enumerate() {
         let before = lines.len();
+        if single_element_target(step).is_some_and(|target| !target.verified) {
+            issues.push(FormatIssue {
+                code: "playwright-target-not-unique",
+                message: "Playwright used the first match, because the recorded selector was not verified to address one element.",
+                step_index,
+                omitted: false,
+            });
+        }
         match step {
             Step::SetViewport { width, height, .. } => {
                 if viewport.is_none() {
@@ -152,7 +199,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 asserted_url,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                let Some(loc) = locator(target, &page, &scope.frame) else {
+                let Some(loc) = locator(target, &page, &scope.frame, true) else {
                     issues.push(FormatIssue {
                         code: "playwright-unsafe-selector",
                         message: "Playwright omitted an action without a safe selector.",
@@ -188,7 +235,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
             }
             Step::Hover { target, scope } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                if let Some(loc) = locator(target, &page, &scope.frame) {
+                if let Some(loc) = locator(target, &page, &scope.frame, true) {
                     lines.push(format!("  await {loc}.hover();"));
                 } else {
                     issues.push(FormatIssue {
@@ -207,7 +254,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 asserted_url,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                if let Some(loc) = locator(target, &page, &scope.frame) {
+                if let Some(loc) = locator(target, &page, &scope.frame, true) {
                     let operation = if *is_select { "selectOption" } else { "fill" };
                     lines.push(format!("  await {loc}.{operation}({});", js(value)));
                     assertion(&mut lines, &page, asserted_url);
@@ -234,7 +281,8 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 ..
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                let Some(loc) = locator(target, &page, &scope.frame) else {
+                // A count assertion matches several elements on purpose.
+                let Some(loc) = locator(target, &page, &scope.frame, count.is_none()) else {
                     issues.push(FormatIssue {
                         code: "playwright-unsafe-selector",
                         message: "Playwright omitted an assertion without a safe selector.",
@@ -335,7 +383,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 asserted_url,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                let Some(loc) = locator(target, &page, &scope.frame) else {
+                let Some(loc) = locator(target, &page, &scope.frame, true) else {
                     issues.push(FormatIssue {
                         code: "playwright-unsafe-selector",
                         message: "Playwright omitted an action without a safe selector.",
@@ -394,7 +442,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 asserted_url,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                if let Some(loc) = locator(target, &page, &scope.frame) {
+                if let Some(loc) = locator(target, &page, &scope.frame, true) {
                     lines.push(format!("  await {loc}.fill({});", js(value)));
                     assertion(&mut lines, &page, asserted_url);
                 }
@@ -408,7 +456,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 asserted_url,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                if let Some(loc) = locator(target, &page, &scope.frame) {
+                if let Some(loc) = locator(target, &page, &scope.frame, true) {
                     if *clear {
                         lines.push(format!("  await {loc}.fill(\"\");"));
                     }
@@ -429,7 +477,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 asserted_url,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                if let Some(loc) = locator(target, &page, &scope.frame) {
+                if let Some(loc) = locator(target, &page, &scope.frame, true) {
                     let values =
                         serde_json::to_string(values).expect("string arrays are valid JSON");
                     lines.push(format!("  await {loc}.selectOption({values});"));
@@ -461,7 +509,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
                 if let Some(target) = target {
-                    if let Some(loc) = locator(target, &page, &scope.frame) {
+                    if let Some(loc) = locator(target, &page, &scope.frame, true) {
                         lines.push(format!("  await {loc}.evaluate((element, delta) => element.scrollBy(delta.x, delta.y), {{ x: {x}, y: {y} }});"));
                     }
                 } else {
@@ -474,7 +522,7 @@ pub fn render_playwright_with_report(title: &str, steps: &[Step]) -> RenderedPla
                 scope,
             } => {
                 let page = page_for(scope, &mut pages, &mut lines);
-                if let Some(loc) = locator(target, &page, &scope.frame) {
+                if let Some(loc) = locator(target, &page, &scope.frame, true) {
                     let paths = serde_json::to_string(paths).expect("string arrays are valid JSON");
                     lines.push(format!("  await {loc}.setInputFiles({paths});"));
                 }
@@ -527,6 +575,7 @@ mod tests {
         Target {
             selectors: vec![selector],
             input_type: None,
+            verified: true,
         }
     }
 
@@ -752,6 +801,88 @@ mod tests {
             render_playwright("hostile \"flow\"\nname", &steps).trim_end(),
             include_str!("test-fixtures/flow.spec.ts").trim_end()
         );
+    }
+
+    #[test]
+    fn an_unverified_target_uses_the_first_match_and_warns() {
+        let unverified = Target {
+            selectors: vec![SelectorKind::Css {
+                value: "button".into(),
+            }],
+            input_type: None,
+            verified: false,
+        };
+        let click = |target: Target| Step::Pointer {
+            target,
+            kind: ClickKind::Click,
+            pointer: PointerKind::Mouse,
+            button: "left".into(),
+            count: 1,
+            position: None,
+            opens_popup: false,
+            popup_page: None,
+            scope: Scope::default(),
+            asserted_url: None,
+        };
+
+        // The command acted on the first match, and Playwright refuses a
+        // locator that matches several elements.
+        let rendered = render_playwright_with_report("first", &[click(unverified)]);
+        assert!(
+            rendered.output.contains("locator(\"button\").first()"),
+            "{}",
+            rendered.output
+        );
+        assert!(
+            rendered
+                .issues
+                .iter()
+                .any(|issue| issue.code == "playwright-target-not-unique" && !issue.omitted),
+            "the fallback must be reported: {:?}",
+            rendered.issues
+        );
+
+        // A probed selector is verified, so it addresses one element as it is.
+        let verified = Target {
+            selectors: vec![SelectorKind::Css {
+                value: "#save".into(),
+            }],
+            input_type: None,
+            verified: true,
+        };
+        let rendered = render_playwright_with_report("verified", &[click(verified)]);
+        assert!(
+            rendered.output.contains("locator(\"#save\").click"),
+            "{}",
+            rendered.output
+        );
+        assert!(!rendered.output.contains(".first()"), "{}", rendered.output);
+        assert!(rendered.issues.is_empty(), "{:?}", rendered.issues);
+    }
+
+    #[test]
+    fn a_count_assertion_keeps_every_match() {
+        let steps = vec![Step::WaitForElement {
+            target: Target {
+                selectors: vec![SelectorKind::Css { value: "li".into() }],
+                input_type: None,
+                verified: false,
+            },
+            scope: Scope::default(),
+            visible: None,
+            properties: Default::default(),
+            count: Some(3),
+            operator: None,
+        }];
+
+        let rendered = render_playwright_with_report("count", &steps);
+
+        assert!(
+            !rendered.output.contains(".first()"),
+            "a count assertion addresses every match: {}",
+            rendered.output
+        );
+        assert!(rendered.issues.is_empty(), "{:?}", rendered.issues);
     }
 
     #[test]

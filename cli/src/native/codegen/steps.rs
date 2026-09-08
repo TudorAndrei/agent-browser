@@ -27,6 +27,13 @@ pub enum SelectorKind {
 pub struct Target {
     pub selectors: Vec<SelectorKind>,
     pub input_type: Option<String>,
+    /// The first selector was verified to address exactly one element: a probed
+    /// unique CSS candidate, a unique test ID, or a role and accessible name
+    /// that the snapshot resolved exactly. A selector the user typed carries no
+    /// such proof, and Playwright refuses a locator that matches several
+    /// elements. `false` also covers an older journal.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 impl Target {
@@ -571,9 +578,11 @@ fn selector_target(selector: &str, refs: &RefMap) -> Target {
         if let Some(value) = reference.selector.clone() {
             selectors.push(SelectorKind::Css { value });
         }
+        let verified = matches!(selectors.first(), Some(SelectorKind::Role { .. }));
         return Target {
             selectors,
             input_type: None,
+            verified,
         };
     }
     let selector = if selector.starts_with("text=") || selector.starts_with("//") {
@@ -590,6 +599,7 @@ fn selector_target(selector: &str, refs: &RefMap) -> Target {
     Target {
         selectors: selector.into_iter().collect(),
         input_type: None,
+        verified: false,
     }
 }
 
@@ -1106,6 +1116,7 @@ fn enrich_target(target: &mut Target, probe: &Probe, prefer_unique: bool) {
                 })
                 .count();
             target.selectors.insert(position, candidate);
+            target.verified = true;
         } else {
             target.selectors.push(candidate);
         }
@@ -1117,6 +1128,8 @@ fn enrich_target(target: &mut Target, probe: &Probe, prefer_unique: bool) {
                 value: test_id.clone(),
             },
         );
+        // The probe reports a test ID only when it is unique.
+        target.verified = true;
     }
     target.input_type = probe.input_type.clone();
 }
@@ -1803,6 +1816,7 @@ mod tests {
                 value: "#pay".to_string(),
             }],
             input_type: None,
+            verified: true,
         };
         let step = Step::Click {
             target,
@@ -1828,6 +1842,7 @@ mod tests {
                 value: "#open".to_string(),
             }],
             input_type: None,
+            verified: true,
         };
         let step = Step::Click {
             target,

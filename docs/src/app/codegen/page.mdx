@@ -55,6 +55,10 @@ A <code>check</code> or <code>uncheck</code> command that finds the control alre
 
 A scroll is recorded as the position the page reached, not as the requested distance. Repeated scrolls therefore replay to the same place, and a scroll that the page limited replays to the limit.
 
+## Targets that are not unique
+
+Codegen prefers a target it verified: a unique test ID, a unique probed CSS selector, or the exact role and accessible name from a snapshot. When only the selector you typed is available, and it can match more than one element, the Playwright spec uses <code>.first()</code>, which is what the command itself did. The <code>playwright-target-not-unique</code> warning names every step in that state. A count assertion is not affected, because it addresses every match on purpose.
+
 ## Format support
 
 Recorder JSON omits sequential typing, multi-value select, upload, key chords, and explicit page creation because its schema cannot keep the exact action intent. It converts back, forward, and reload to navigation to the observed final URL and reports a lossy warning. Recorder identifies a non-main page by URL, so two pages with the same URL are ambiguous.
