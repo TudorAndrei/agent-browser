@@ -658,7 +658,7 @@ fn action_support(action: &str) -> ActionSupport {
         | "requests" | "request_detail" | "react_tree" | "react_inspect" | "react_suspense"
         | "vitals" | "tab_list" | "tab_switch" | "stream_status" | "device_list"
         | "codegen_start" | "codegen_stop" | "codegen_status" | "codegen_discard" | "launch"
-        | "close" => ActionSupport::Observation,
+        | "close" | "webmcp_list" | "webmcp_result" => ActionSupport::Observation,
         _ => ActionSupport::Omitted,
     }
 }
@@ -1902,6 +1902,8 @@ mod tests {
             "requests",
             "vitals",
             "tab_list",
+            "webmcp_list",
+            "webmcp_result",
         ] {
             let (_directory, mut state) = active_state();
             record_action(
