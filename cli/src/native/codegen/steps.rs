@@ -1582,10 +1582,7 @@ mod tests {
             2,
             "one initial viewport plus the explicit viewport action"
         );
-        assert!(matches!(
-            state.steps.iter().find(|step| matches!(step, Step::Pointer { target, .. } if target.selectors == vec![SelectorKind::Css { value: "#button".to_string() }])),
-            Some(_)
-        ));
+        assert!(state.steps.iter().any(|step| matches!(step, Step::Pointer { target, .. } if target.selectors == vec![SelectorKind::Css { value: "#button".to_string() }])));
     }
 
     #[test]

@@ -1687,7 +1687,7 @@ mod tests {
         let mut state = restored_state(&directory);
         let opener = page(1, "opener", "session-a", "https://example.com");
         let identity = state
-            .sync_runtime_pages(&[opener.clone()], Some("opener"), false)
+            .sync_runtime_pages(std::slice::from_ref(&opener), Some("opener"), false)
             .unwrap();
         state.initial_state_captured = true;
         let action_id = state.capture_action(
