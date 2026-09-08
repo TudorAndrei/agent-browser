@@ -270,10 +270,13 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
             path.display()
         ));
     }
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read codegen journal: {error}"))?;
-    let has_final_newline = content.ends_with('\n');
-    let raw_lines: Vec<&str> = content.split('\n').collect();
+    // Read bytes, not text. Captured values are stored verbatim, so a crash
+    // inside a multi-byte sequence must not make every earlier record
+    // unreadable.
+    let content =
+        fs::read(path).map_err(|error| format!("Failed to read codegen journal: {error}"))?;
+    let has_final_newline = content.last() == Some(&b'\n');
+    let raw_lines: Vec<&[u8]> = content.split(|byte| *byte == b'\n').collect();
     let mut expected_sequence = 1u64;
     let mut title = None;
     let mut last_url = None;
@@ -300,6 +303,18 @@ pub fn recover(path: &Path) -> Result<RecoveredJournal, String> {
         if line.is_empty() {
             continue;
         }
+        let line = match std::str::from_utf8(line) {
+            Ok(line) => line,
+            // The same rule as a partial JSON record: one unterminated final
+            // line can be incomplete, and anything else is corrupt.
+            Err(_) if is_last_content_line && !has_final_newline => break,
+            Err(error) => {
+                return Err(format!(
+                    "Invalid complete codegen journal record at line {}: {error}",
+                    index + 1
+                ))
+            }
+        };
         let envelope: JournalEnvelope = match serde_json::from_str(line) {
             Ok(envelope) => envelope,
             Err(_error) if is_last_content_line && !has_final_newline => break,
@@ -720,6 +735,56 @@ mod tests {
 
         assert!(error.contains("not a regular file"), "{error}");
         assert_eq!(fs::read_to_string(&target).unwrap(), before);
+    }
+
+    #[test]
+    fn a_torn_multi_byte_write_keeps_every_earlier_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        let start = serde_json::to_string(&JournalEnvelope {
+            version: JOURNAL_VERSION,
+            sequence: 1,
+            record: JournalRecord::Start {
+                title: "flow".to_string(),
+                last_url: None,
+            },
+        })
+        .unwrap();
+        // A crash inside a UTF-8 sequence. Captured values are stored verbatim,
+        // so a journal can hold any text.
+        let mut bytes = format!("{start}\n{{\"version\":1,\"data\":\"\u{20ac}").into_bytes();
+        bytes.truncate(bytes.len() - 1);
+        fs::write(&path, &bytes).unwrap();
+
+        let recovered = recover(&path).unwrap();
+        assert_eq!(recovered.next_sequence, 2);
+        repair(&path, recovered.valid_bytes).unwrap();
+        append(&path, 2, &JournalRecord::DiscardRequested).unwrap();
+
+        let again = recover(&path).unwrap();
+        assert_eq!(again.next_sequence, 3);
+    }
+
+    #[test]
+    fn a_complete_record_that_is_not_utf8_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.codegen.jsonl");
+        let start = serde_json::to_string(&JournalEnvelope {
+            version: JOURNAL_VERSION,
+            sequence: 1,
+            record: JournalRecord::Start {
+                title: "flow".to_string(),
+                last_url: None,
+            },
+        })
+        .unwrap();
+        let mut bytes = format!("{start}\n").into_bytes();
+        bytes.extend_from_slice(b"{\"version\":1,\"data\":\"\xE2\x82\"}\n");
+        fs::write(&path, &bytes).unwrap();
+
+        let error = recover(&path).unwrap_err();
+
+        assert!(error.contains("line 2"), "{error}");
     }
 
     #[test]

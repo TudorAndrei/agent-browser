@@ -6,14 +6,7 @@ settings:
 
 importers:
 
-  .:
-    devDependencies:
-      '@playwright/test':
-        specifier: 1.62.1
-        version: 1.62.1
-      '@puppeteer/replay':
-        specifier: 4.0.2
-        version: 4.0.2
+  .: {}
 
   docs:
     dependencies:
@@ -225,6 +218,15 @@ importers:
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
+
+  tests:
+    devDependencies:
+      '@playwright/test':
+        specifier: 1.62.1
+        version: 1.62.1
+      '@puppeteer/replay':
+        specifier: 4.0.2
+        version: 4.0.2
 
 packages:
 

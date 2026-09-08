@@ -32,7 +32,7 @@
     "postinstall": "node scripts/postinstall.js",
     "test:launcher": "node --test test/launcher.test.mjs",
     "build:dashboard": "cd packages/dashboard && pnpm build",
-    "test:codegen-formats": "node --test --test-force-exit tests/codegen-format-conformance.test.mjs"
+    "test:codegen-formats": "pnpm --dir tests test"
   },
   "keywords": [
     "browser",
@@ -52,8 +52,5 @@
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
   "homepage": "https://agent-browser.dev",
-  "devDependencies": {
-    "@playwright/test": "1.62.1",
-    "@puppeteer/replay": "4.0.2"
-  }
+  "devDependencies": {}
 }

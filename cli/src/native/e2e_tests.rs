@@ -1534,6 +1534,105 @@ async fn e2e_codegen_keeps_a_navigation_url_off_an_earlier_click() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// Replay the artifact. Every other codegen test checks what capture wrote;
+/// this one runs the generated spec in Playwright's own browser and requires it
+/// to pass its own assertions. Needs `pnpm install` and a Playwright browser.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_playwright_artifact_replays() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-replay-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-replay");
+
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the CLI crate lives inside the repository")
+        .to_path_buf();
+    let harness = repository.join("tests");
+    let playwright = harness.join("node_modules/@playwright/test/cli.js");
+    if !playwright.exists() {
+        eprintln!("skipping replay: run `pnpm install` first");
+        return;
+    }
+    // The harness config points Playwright at this directory, and a spec here
+    // resolves `@playwright/test` from the harness package.
+    let generated = harness.join("generated");
+    std::fs::create_dir_all(&generated).expect("the generated directory should be created");
+
+    let page = "data:text/html,<body><input id=agree type=checkbox>\
+<input id=name><button id=save>Save</button>\
+<p id=done hidden>Saved</p>\
+<script>document.getElementById('save').onclick=()=>\
+document.getElementById('done').hidden=false;</script></body>";
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "replay" }),
+            &mut state,
+        )
+        .await,
+    );
+    for command in [
+        json!({ "id": "3", "action": "navigate", "url": page }),
+        json!({ "id": "4", "action": "fill", "selector": "#name", "value": "Ada" }),
+        json!({ "id": "5", "action": "check", "selector": "#agree" }),
+        json!({ "id": "6", "action": "click", "selector": "#save" }),
+        json!({ "id": "7", "action": "isvisible", "selector": "#done" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+
+    let spec_name = format!("replay-{}.spec.ts", std::process::id());
+    let spec = generated.join(&spec_name);
+    let stop = execute_command(
+        &json!({
+            "id": "8",
+            "action": "codegen_stop",
+            "path": spec.to_string_lossy(),
+            "format": "playwright",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+
+    let output = std::process::Command::new("node")
+        .arg(&playwright)
+        .args(["test", &spec_name, "--reporter=line"])
+        .current_dir(&harness)
+        .output()
+        .expect("the Playwright CLI should run");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let source = std::fs::read_to_string(&spec).unwrap_or_default();
+    let _ = std::fs::remove_file(&spec);
+    assert!(
+        output.status.success(),
+        "the generated spec must pass in Playwright:\n{report}\n\n{source}"
+    );
+}
+
 /// The probe builds a positional CSS path, but it cannot reach an element
 /// inside a shadow root from the document. It must then report no selector, so
 /// the exact role and name from the snapshot stays the target.
@@ -2251,6 +2350,8 @@ async fn e2e_codegen_probes_css_password_and_unnamed_ref() {
     );
     let active_delta = state.browser.as_ref().unwrap().client.command_count() - before_active;
     let active_elapsed = active_start.elapsed();
+    // Reported, not asserted. The assertion below holds the round-trip budget;
+    // the timing is evidence for one machine and must not become a threshold.
     eprintln!(
         "codegen fill evidence: inactive={inactive_delta} CDP commands, active={active_delta} CDP commands, active_elapsed_us={}",
         active_elapsed.as_micros()
