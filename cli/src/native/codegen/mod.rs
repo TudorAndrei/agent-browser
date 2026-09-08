@@ -164,7 +164,10 @@ fn render_recorder(
             continue;
         }
         if let Some(logical_id) = value.get("target").and_then(Value::as_str) {
-            if let Some(url) = page_urls.get(logical_id) {
+            // The URL captured with the action wins. The final page URL is the
+            // fallback for a journal written before capture stored it.
+            let captured = steps::step_scope(step).and_then(|scope| scope.page_url.as_deref());
+            if let Some(url) = captured.or_else(|| page_urls.get(logical_id).copied()) {
                 if duplicate_urls.get(url).copied().unwrap_or_default() > 1
                     && warned_ambiguous_pages.insert(logical_id.to_string())
                 {
@@ -470,6 +473,7 @@ impl CodegenState {
         Scope {
             target: page.page_id.clone(),
             frame: Vec::new(),
+            page_url: None,
         }
     }
 
@@ -1557,6 +1561,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::ScopedNavigation {
@@ -1565,6 +1570,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::Pointer {
@@ -1579,6 +1585,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 asserted_url: Some("https://example.com/done".to_string()),
             },
@@ -1588,6 +1595,7 @@ mod tests {
                 scope: Scope {
                     target: "p2".to_string(),
                     frame: vec![0, 1],
+                    page_url: None,
                 },
                 asserted_url: None,
             },
@@ -1595,6 +1603,7 @@ mod tests {
                 scope: Scope {
                     target: "p2".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
         ];
@@ -1939,6 +1948,43 @@ mod tests {
     }
 
     #[test]
+    fn recorder_prefers_the_captured_url_and_falls_back_to_the_final_url() {
+        let pages = vec![sidecar::PersistedPage {
+            page_id: "p2".to_string(),
+            target_id: None,
+            opener_target_id: None,
+            popup_attributed: true,
+            url: "https://example.com/final".to_string(),
+            closed: false,
+            url_unrecorded: false,
+        }];
+        let scope = |page_url: Option<&str>| Scope {
+            target: "p2".to_string(),
+            frame: Vec::new(),
+            page_url: page_url.map(str::to_string),
+        };
+
+        let captured = render_recorder(
+            "flow",
+            &[Step::ClosePage {
+                scope: scope(Some("https://example.com/at-capture")),
+            }],
+            &pages,
+        );
+        assert_eq!(
+            captured.flow["steps"][0]["target"],
+            "https://example.com/at-capture"
+        );
+
+        // A journal written before capture stored the URL has no value here.
+        let older = render_recorder("flow", &[Step::ClosePage { scope: scope(None) }], &pages);
+        assert_eq!(
+            older.flow["steps"][0]["target"],
+            "https://example.com/final"
+        );
+    }
+
+    #[test]
     fn an_unrecorded_page_move_warns_and_forces_the_next_navigate() {
         assert!(steps::action_is_omitted("webmcp_invoke"));
         assert!(!steps::action_is_omitted("webmcp_list"));
@@ -1983,6 +2029,7 @@ mod tests {
             Scope {
                 target: "p1".to_string(),
                 frame: Vec::new(),
+                page_url: None,
             },
             None,
             &mut state,
@@ -2022,6 +2069,7 @@ mod tests {
                 Scope {
                     target: "p1".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 None,
                 &mut state,

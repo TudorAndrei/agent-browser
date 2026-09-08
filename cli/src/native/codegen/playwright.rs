@@ -551,6 +551,7 @@ mod tests {
             scope: Scope {
                 target: "p1".into(),
                 frame: Vec::new(),
+                page_url: None,
             },
             asserted_url: None,
         };
@@ -565,6 +566,7 @@ mod tests {
                     scope: Scope {
                         target: "p1".into(),
                         frame: Vec::new(),
+                        page_url: None,
                     },
                 },
                 click("p2"),
@@ -577,6 +579,7 @@ mod tests {
                     scope: Scope {
                         target: "p2".into(),
                         frame: Vec::new(),
+                        page_url: None,
                     },
                     asserted_url: None,
                 },
@@ -588,6 +591,7 @@ mod tests {
                     scope: Scope {
                         target: "p3".into(),
                         frame: Vec::new(),
+                        page_url: None,
                     },
                 },
             ],
@@ -610,6 +614,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::ScopedNavigation {
@@ -618,6 +623,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::Fill {
@@ -628,6 +634,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: vec![0, 1],
+                    page_url: None,
                 },
                 asserted_url: None,
             },
@@ -641,6 +648,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 asserted_url: None,
             },
@@ -652,6 +660,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 asserted_url: None,
             },
@@ -661,6 +670,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 asserted_url: Some("https://example.com/done".into()),
             },
@@ -673,6 +683,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::Upload {
@@ -683,6 +694,7 @@ mod tests {
                 scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::OpenPage {
@@ -690,10 +702,12 @@ mod tests {
                 source_scope: Scope {
                     target: "p1".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 scope: Scope {
                     target: "p2".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::NewPage {
@@ -701,12 +715,14 @@ mod tests {
                 scope: Scope {
                     target: "p3".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
             Step::ClosePage {
                 scope: Scope {
                     target: "p2".into(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
             },
         ];

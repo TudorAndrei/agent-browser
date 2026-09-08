@@ -65,6 +65,12 @@ pub struct Scope {
     pub target: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frame: Vec<usize>,
+    /// URL of the page when the action ran. The Recorder runner finds a target
+    /// page by its current URL before it runs a step, so a page that navigates
+    /// after the action must not receive its final URL. `None` means an older
+    /// journal, and Recorder then falls back to the final page URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +93,7 @@ impl Default for Scope {
         Self {
             target: "main".to_string(),
             frame: Vec::new(),
+            page_url: None,
         }
     }
 }
@@ -703,6 +710,12 @@ pub fn record_action<C: Into<ActionContext>>(
     let mut sc = context.before;
     if let Some(frame) = capture.and_then(|capture| capture.frame.as_ref()) {
         sc.frame = frame.clone();
+    }
+    // Keep the URL the page had for this action. Recorder finds a target page
+    // by its current URL, so the final URL of a page that navigates later
+    // cannot address the page that this action used.
+    if sc.page_url.is_none() {
+        sc.page_url = state.page_url(&sc.target).map(str::to_string);
     }
     match action {
         "navigate" => {
@@ -1651,10 +1664,12 @@ mod tests {
                 before: Scope {
                     target: "p1".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 after: Some(Scope {
                     target: "p2".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 }),
             },
             None,
@@ -1687,10 +1702,12 @@ mod tests {
                 before: Scope {
                     target: "p2".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 },
                 after: Some(Scope {
                     target: "p1".to_string(),
                     frame: Vec::new(),
+                    page_url: None,
                 }),
             },
             None,
@@ -1740,6 +1757,7 @@ mod tests {
         let tab = Scope {
             target: "https://other.example".to_string(),
             frame: vec![0],
+            page_url: None,
         };
         let tab = serde_json::to_value(tab).unwrap();
         assert_eq!(tab["target"], "https://other.example");
@@ -1762,6 +1780,7 @@ mod tests {
             scope: Scope {
                 target: "https://popup.example".to_string(),
                 frame: vec![1, 0],
+                page_url: None,
             },
             asserted_url: None,
         };
@@ -1873,6 +1892,7 @@ mod tests {
                 Scope {
                     target: "page-2".to_string(),
                     frame: vec![1],
+                    page_url: None,
                 },
                 Some(&capture),
                 &mut state,
@@ -1956,6 +1976,7 @@ mod tests {
             Scope {
                 target: "p1".to_string(),
                 frame: Vec::new(),
+                page_url: None,
             },
             None,
             &mut state,
@@ -2026,6 +2047,7 @@ mod tests {
             Scope {
                 target: "p1".to_string(),
                 frame: Vec::new(),
+                page_url: None,
             },
             None,
             &mut state,
@@ -2060,6 +2082,7 @@ mod tests {
             Scope {
                 target: "p1".to_string(),
                 frame: Vec::new(),
+                page_url: None,
             },
             None,
             &mut state,
