@@ -1447,6 +1447,207 @@ async fn e2e_codegen_warns_and_keeps_the_navigate_after_an_unrecorded_move() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+/// An explicit navigation produces a URL that no earlier click caused. A click
+/// that did not navigate must not receive that URL as an assertion, because the
+/// generated test would then wait for a page that the click never reaches.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_keeps_a_navigation_url_off_an_earlier_click() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-attribution-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-attribution");
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "attribution" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<button id=noop>Noop</button>" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "click", "selector": "#noop" }),
+            &mut state,
+        )
+        .await,
+    );
+    let second = "data:text/html,<h1>Second</h1>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "navigate", "url": second }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "6", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let steps = get_data(&stop)["flow"]["steps"]
+        .as_array()
+        .expect("the flow should have steps")
+        .clone();
+
+    let click = steps
+        .iter()
+        .find(|step| step["type"] == "click")
+        .expect("the click should stay in the flow");
+    assert!(
+        click["assertedEvents"].is_null(),
+        "the click did not navigate, so it must have no asserted URL: {click}"
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|step| step["type"] == "navigate" && step["url"] == second),
+        "the explicit navigation should stay in the flow: {steps:?}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+/// `tab close <id>` can close a tab that is not active. Codegen must record the
+/// requested page, and it must leave the active page usable.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_closes_the_requested_tab_not_the_active_tab() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-tabclose-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-tabclose");
+
+    let first = "data:text/html,<button id=one>One</button>";
+    let second = "data:text/html,<h1>Two</h1>";
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "tabclose" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": first }),
+            &mut state,
+        )
+        .await,
+    );
+    let opened = execute_command(
+        &json!({ "id": "4", "action": "tab_new", "url": second }),
+        &mut state,
+    )
+    .await;
+    assert_success(&opened);
+    let second_tab = get_data(&opened)["tabId"]
+        .as_str()
+        .expect("tab new should report a tab id")
+        .to_string();
+    let tabs = execute_command(&json!({ "id": "5", "action": "tab_list" }), &mut state).await;
+    assert_success(&tabs);
+    let first_tab = get_data(&tabs)["tabs"]
+        .as_array()
+        .expect("tab list should report tabs")
+        .iter()
+        .find_map(|tab| {
+            (tab["url"].as_str() == Some(first)).then(|| tab["tabId"].as_str().unwrap().to_string())
+        })
+        .expect("the first tab should still be open");
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "tab_switch", "tabId": first_tab }),
+            &mut state,
+        )
+        .await,
+    );
+    // The active tab is the first one, and the command names the second.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "7", "action": "tab_close", "tabId": second_tab }),
+            &mut state,
+        )
+        .await,
+    );
+    // The active page must keep its identity and stay usable.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "8", "action": "click", "selector": "#one" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let stop = execute_command(
+        &json!({ "id": "9", "action": "codegen_stop", "format": "json" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    let steps = get_data(&stop)["flow"]["steps"]
+        .as_array()
+        .expect("the flow should have steps")
+        .clone();
+
+    let close = steps
+        .iter()
+        .find(|step| step["type"] == "close")
+        .expect("the close should stay in the flow");
+    assert_eq!(
+        close["target"], second,
+        "codegen must record the requested tab, not the active tab: {steps:?}"
+    );
+    assert!(
+        steps.iter().any(|step| step["type"] == "click"),
+        "the click on the active page should stay in the flow: {steps:?}"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_codegen_preserves_enter_navigation_and_initial_url() {

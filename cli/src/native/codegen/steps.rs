@@ -669,8 +669,15 @@ fn action_support(action: &str) -> ActionSupport {
 /// `record start --url` navigates the active page, and an omitted command can
 /// run arbitrary page script, so neither can keep an earlier pending
 /// assertion. A missing assertion is safer than a false one.
+///
+/// Explicit navigation is the same case. `ScopedNavigation` cannot carry an
+/// assertion, so it never replaces the pending action, and the URL it produces
+/// would land on an earlier click that did not navigate.
 pub fn action_breaks_navigation_attribution(action: &str) -> bool {
-    action == "recording_start" || action_is_omitted(action)
+    matches!(
+        action,
+        "recording_start" | "navigate" | "back" | "forward" | "reload"
+    ) || action_is_omitted(action)
 }
 
 /// The command was successful, but codegen cannot express it. Its page effect
@@ -1998,6 +2005,13 @@ mod tests {
         assert!(action_breaks_navigation_attribution("recording_start"));
         assert!(action_breaks_navigation_attribution("webmcp_invoke"));
         assert!(action_breaks_navigation_attribution("evaluate"));
+        // Explicit navigation produces a URL that no earlier click caused.
+        for action in ["navigate", "back", "forward", "reload"] {
+            assert!(
+                action_breaks_navigation_attribution(action),
+                "{action} must end attribution"
+            );
+        }
         assert!(!action_breaks_navigation_attribution("click"));
         assert!(!action_breaks_navigation_attribution("snapshot"));
 

@@ -2452,6 +2452,26 @@ fn provider_plugin_launch_options_from_command(cmd: &Value) -> Value {
     Value::Object(options)
 }
 
+/// The logical codegen page that `tab close` was asked to close. Returns `None`
+/// when the command names no tab, so the active page stays the recorded page.
+fn requested_close_page(cmd: &Value, state: &DaemonState) -> Option<codegen::PageIdentity> {
+    let tab = cmd.get("tabId").and_then(Value::as_str)?;
+    let manager = state.browser.as_ref()?;
+    let tab_ref = super::browser::TabRef::parse(tab).ok()?;
+    let tab_id = manager.resolve_tab_ref(&tab_ref).ok()?;
+    let page = manager
+        .pages_list()
+        .into_iter()
+        .find(|page| page.tab_id == tab_id)?;
+    let page_id = state.codegen.page_for_target(&page.target_id)?;
+    Some(codegen::PageIdentity {
+        page_id,
+        target_id: page.target_id,
+        session_id: page.session_id,
+        url: page.url,
+    })
+}
+
 fn skip_launch_action(action: &str) -> bool {
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         return true;
@@ -2889,6 +2909,14 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    // `tab close <id>` acts on the named page, which is not always the active
+    // page. Resolve it before the command removes it.
+    let requested_close_page = if state.codegen.is_active() && action == "tab_close" {
+        requested_close_page(cmd, state)
+    } else {
+        None
+    };
+
     let mut result = match action {
         "launch" => {
             let webmcp_enabled = cmd
@@ -3122,8 +3150,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     .ensure_initial_page_state(page, state.viewport);
             }
 
-            let before_scope = pre_action_page
+            let before_scope = requested_close_page
                 .as_ref()
+                .or(pre_action_page.as_ref())
                 .map(codegen::CodegenState::scope_for_page)
                 .or_else(|| {
                     post_action_page
@@ -3219,7 +3248,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             }
 
             if action == "tab_close" {
-                if let Some(page) = pre_action_page.as_ref() {
+                if let Some(page) = requested_close_page.as_ref().or(pre_action_page.as_ref()) {
                     state.codegen.mark_page_closed(&page.page_id);
                 }
             }
